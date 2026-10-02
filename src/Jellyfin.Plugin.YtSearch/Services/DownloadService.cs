@@ -44,6 +44,22 @@ public class DownloadService
         return task.WaitAsync(requestAborted);
     }
 
+    /// <summary>Refuses new downloads once the library is over its size limit (after trying a cleanup first).</summary>
+    private async Task EnsureSpaceAsync(TrackResult track)
+    {
+        var limit = (long)Math.Max(Plugin.Instance?.Configuration.MaxLibraryMegabytes ?? 20480, 0) * 1024 * 1024;
+        if (limit == 0 || _library.LibrarySizeBytes() <= limit)
+        {
+            return;
+        }
+
+        await _cleanup.RunAsync(track.TrackId).ConfigureAwait(false);
+        if (_library.LibrarySizeBytes() > limit)
+        {
+            throw new DownloadException("The download library is full. Free some space or raise the limit in the plugin settings.");
+        }
+    }
+
     private async Task RunAsync(TrackResult track)
     {
         var tmp = Path.Combine(_paths.DataPath, "ytsearch", "tmp", Guid.NewGuid().ToString("N"));
@@ -53,6 +69,13 @@ public class DownloadService
             {
                 return;
             }
+
+            if (string.IsNullOrEmpty(track.PageUrl))
+            {
+                throw new DownloadException("This track is unavailable.");
+            }
+
+            await EnsureSpaceAsync(track).ConfigureAwait(false);
 
             var timeout = TimeSpan.FromSeconds(Math.Max(Plugin.Instance?.Configuration.DownloadTimeoutSeconds ?? 300, 10));
             using var cts = new CancellationTokenSource(timeout);

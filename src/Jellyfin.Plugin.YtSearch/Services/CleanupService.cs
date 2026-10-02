@@ -67,9 +67,10 @@ public class CleanupService
         await _running.WaitAsync().ConfigureAwait(false);
         try
         {
-            var root = _libraryService.Root.TrimEnd('/') + "/";
+            // Only ever touch files this plugin created (yt-*.m4a / sc-*.m4a in its own folder), even if the
+            // library path was pointed at a folder that also holds other music.
             var tracks = _library.GetItemList(new InternalItemsQuery { IncludeItemTypes = new[] { BaseItemKind.Audio }, Recursive = true })
-                .Where(i => i.Path != null && i.Path.StartsWith(root, StringComparison.Ordinal))
+                .Where(i => _libraryService.IsOurFile(i.Path))
                 .ToList();
             if (tracks.Count == 0)
             {

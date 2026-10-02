@@ -30,6 +30,12 @@ public class SearchService
     /// <summary>Searches every enabled source in parallel. YouTube results come first, then SoundCloud.</summary>
     public async Task<IReadOnlyList<TrackResult>> SearchAsync(string query, CancellationToken ct)
     {
+        query = InputGuard.CleanQuery(query);
+        if (query.Length < 2)
+        {
+            return Array.Empty<TrackResult>();
+        }
+
         var cfg = Plugin.Instance?.Configuration;
         var tasks = new List<Task<IReadOnlyList<TrackResult>>>
         {
@@ -58,6 +64,8 @@ public class SearchService
             var key = $"{source}|{query.Trim().ToLowerInvariant()}|{max}";
             if (!_cache.TryGetValue(key, out var entry) || entry.Expires < DateTime.UtcNow || entry.Task.IsFaulted)
             {
+                PruneCache();
+
                 // Not tied to the request token: a cancelled request shouldn't poison the shared task.
                 entry = (DateTime.UtcNow + ttl, RunAsync(source, query, max));
                 _cache[key] = entry;
@@ -73,6 +81,26 @@ public class SearchService
         {
             _logger.LogWarning(ex, "{Source} search for '{Query}' failed", source, query);
             return Array.Empty<TrackResult>();
+        }
+    }
+
+    /// <summary>Keeps the per-query cache from growing without bound.</summary>
+    private void PruneCache()
+    {
+        if (_cache.Count < 500)
+        {
+            return;
+        }
+
+        var now = DateTime.UtcNow;
+        foreach (var kv in _cache.Where(kv => kv.Value.Expires < now).ToList())
+        {
+            _cache.TryRemove(kv.Key, out _);
+        }
+
+        if (_cache.Count >= 500)
+        {
+            _cache.Clear();
         }
     }
 

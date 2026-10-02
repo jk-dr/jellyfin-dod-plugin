@@ -18,6 +18,9 @@ public class PluginConfiguration : BasePluginConfiguration
     /// <summary>Where downloaded tracks live (added as a Music library automatically). Empty = plugin data folder.</summary>
     public string LibraryPath { get; set; } = string.Empty;
 
+    /// <summary>New downloads are refused once downloaded tracks use more than this many megabytes.</summary>
+    public int MaxLibraryMegabytes { get; set; } = 20480;
+
     public int DownloadTimeoutSeconds { get; set; } = 300;
 
     public bool EnableCleanup { get; set; } = true;

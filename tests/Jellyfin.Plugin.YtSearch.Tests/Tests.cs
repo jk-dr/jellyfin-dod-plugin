@@ -137,3 +137,91 @@ public class PlayabilityTests
     public void ClassifiesPermanentFailures(string stderr, bool permanent) =>
         Assert.Equal(permanent, Jellyfin.Plugin.YtSearch.Services.YtDlpService.IsPermanentFailure(stderr));
 }
+
+public class SecurityTests
+{
+    private static readonly System.Func<string, string?, bool> Valid = Jellyfin.Plugin.YtSearch.Services.InputGuard.IsValidSourceId;
+
+    [Theory]
+    [InlineData("youtube", "dQw4w9WgXcQ", true)]
+    [InlineData("youtube", "abc-_123456", true)]
+    [InlineData("youtube", "../../etc/pw", false)]
+    [InlineData("youtube", "dQw4w9WgXc/", false)]
+    [InlineData("youtube", "short", false)]
+    [InlineData("youtube", "-abcdefghij", true)] // real ids may start with "-"; ids only appear inside an https URL and a yt-<id>.m4a name
+    [InlineData("soundcloud", "253508261", true)]
+    [InlineData("soundcloud", "12/../34", false)]
+    [InlineData("soundcloud", "abc", false)]
+    [InlineData("soundcloud", "", false)]
+    public void ValidatesIds(string source, string id, bool ok) => Assert.Equal(ok, Valid(source, id));
+
+    [Theory]
+    [InlineData("https://i.ytimg.com/vi/x/hqdefault.jpg", true)]
+    [InlineData("https://i1.sndcdn.com/artworks-a-original.jpg", true)]
+    [InlineData("https://yt3.ggpht.com/a", true)]
+    [InlineData("http://i.ytimg.com/vi/x/a.jpg", false)]
+    [InlineData("https://127.0.0.1/a.jpg", false)]
+    [InlineData("https://localhost/a.jpg", false)]
+    [InlineData("https://169.254.169.254/latest/meta-data", false)]
+    [InlineData("https://evilytimg.com/a.jpg", false)]
+    [InlineData("https://i.ytimg.com.evil.com/a.jpg", false)]
+    [InlineData("https://user:pw@i.ytimg.com/a.jpg", false)]
+    [InlineData("https://i.ytimg.com:8443/a.jpg", false)]
+    [InlineData("javascript:alert(1)", false)]
+    [InlineData("file:///etc/passwd", false)]
+    public void ThumbnailUrlsAreAllowlisted(string url, bool ok) =>
+        Assert.Equal(ok, Jellyfin.Plugin.YtSearch.Services.InputGuard.SafeThumbnailUrl(url) is not null);
+
+    [Theory]
+    [InlineData("https://soundcloud.com/a/b", true)]
+    [InlineData("https://api.soundcloud.com/tracks/soundcloud%3Atracks%3A1", true)]
+    [InlineData("https://www.youtube.com/watch?v=dQw4w9WgXcQ", true)]
+    [InlineData("https://evil.com/x", false)]
+    [InlineData("-o /etc/cron.d/x", false)]
+    [InlineData("http://soundcloud.com/a", false)]
+    public void PageUrlsAreAllowlisted(string url, bool ok) =>
+        Assert.Equal(ok, Jellyfin.Plugin.YtSearch.Services.InputGuard.SafePageUrl(url) is not null);
+
+    [Fact]
+    public void QueryIsCleaned()
+    {
+        Assert.Equal("a b", Jellyfin.Plugin.YtSearch.Services.InputGuard.CleanQuery("a\r\n\u0000 b\t".Replace("\\r", "\r")).Replace("  ", " ").Replace("\r", string.Empty));
+        Assert.Equal(200, Jellyfin.Plugin.YtSearch.Services.InputGuard.CleanQuery(new string('x', 5000)).Length);
+        Assert.Equal(string.Empty, Jellyfin.Plugin.YtSearch.Services.InputGuard.CleanQuery("   \n "));
+    }
+
+    [Fact]
+    public void ParserDropsHostileEntries()
+    {
+        const string json = """
+        {"entries":[
+          {"id":"../../etc/pw","title":"x","duration":10},
+          {"id":"dQw4w9WgXcQ","title":"<img src=x onerror=alert(1)>\u0007ok","channel":"c","duration":10}
+        ]}
+        """;
+        var r = Jellyfin.Plugin.YtSearch.Services.YtDlpService.ParseSearchJson(json);
+        Assert.Single(r);
+        Assert.DoesNotContain('\u0007', r[0].Title);
+
+        const string sc = """
+        {"entries":[
+          {"id":"1","title":"t","duration":10,"webpage_url":"https://evil.com/x","thumbnails":[{"url":"https://127.0.0.1/a.jpg"}]},
+          {"id":"2","title":"t","duration":10,"webpage_url":"https://soundcloud.com/a/b","thumbnails":[{"url":"https://127.0.0.1/a.jpg"}]}
+        ]}
+        """;
+        var s = Jellyfin.Plugin.YtSearch.Services.YtDlpService.ParseSearchJson(sc, Jellyfin.Plugin.YtSearch.Services.Sources.SoundCloud);
+        Assert.Single(s);
+        Assert.Equal(string.Empty, s[0].ThumbnailUrl);
+    }
+
+    [Theory]
+    [InlineData("/lib/yt-dQw4w9WgXcQ.m4a", true)]
+    [InlineData("/lib/sc-253508261.m4a", true)]
+    [InlineData("/lib/My Favourite Song.m4a", false)]
+    [InlineData("/lib/sub/yt-dQw4w9WgXcQ.m4a", false)]
+    [InlineData("/other/yt-dQw4w9WgXcQ.m4a", false)]
+    [InlineData("/lib/yt-dQw4w9WgXcQ.mp3", false)]
+    [InlineData(null, false)]
+    public void CleanupOnlyTouchesOurFiles(string? path, bool ours) =>
+        Assert.Equal(ours, Jellyfin.Plugin.YtSearch.Services.LibraryService.IsOurFile("/lib", path));
+}

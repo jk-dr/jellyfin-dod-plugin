@@ -30,6 +30,10 @@ public class YtDlpService
     private readonly ILogger<YtDlpService> _logger;
     private readonly SemaphoreSlim _installLock = new(1, 1);
 
+    // Bound the number of yt-dlp processes so a burst of requests can't exhaust the server.
+    private readonly SemaphoreSlim _lightGate = new(12);
+    private readonly SemaphoreSlim _downloadGate = new(3);
+
     public YtDlpService(IApplicationPaths paths, CookieService cookies, IMediaEncoder encoder, ILogger<YtDlpService> logger)
     {
         _paths = paths;
@@ -41,6 +45,25 @@ public class YtDlpService
     public string DataDirectory => Path.Combine(_paths.DataPath, "ytsearch");
 
     public async Task<IReadOnlyList<TrackResult>> SearchAsync(string source, string query, int max, CancellationToken ct)
+    {
+        query = InputGuard.CleanQuery(query);
+        if (query.Length == 0)
+        {
+            return Array.Empty<TrackResult>();
+        }
+
+        await _lightGate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            return await SearchCoreAsync(source, query, max, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            _lightGate.Release();
+        }
+    }
+
+    private async Task<IReadOnlyList<TrackResult>> SearchCoreAsync(string source, string query, int max, CancellationToken ct)
     {
         var bin = await EnsureBinaryAsync(ct).ConfigureAwait(false);
         var psi = new ProcessStartInfo(bin)
@@ -92,32 +115,33 @@ public class YtDlpService
         {
             var id = Str(e, "id");
             // No duration = live/upcoming/not a track.
-            if (string.IsNullOrEmpty(id) || !e.TryGetProperty("duration", out var d) || d.ValueKind != JsonValueKind.Number)
+            if (!InputGuard.IsValidSourceId(source, id) || !e.TryGetProperty("duration", out var d) || d.ValueKind != JsonValueKind.Number)
             {
                 continue;
             }
 
-            var title = Str(e, "title") ?? id;
+            var duration = d.GetDouble();
+            if (double.IsNaN(duration) || duration <= 0 || duration > 24 * 3600)
+            {
+                continue;
+            }
+
+            var title = InputGuard.CleanText(Str(e, "title"), 300, id!);
             if (source == Sources.SoundCloud)
             {
-                var page = Str(e, "webpage_url") ?? Str(e, "url");
+                var page = InputGuard.SafePageUrl(Str(e, "webpage_url") ?? Str(e, "url"));
                 if (page is null)
                 {
                     continue;
                 }
 
-                results.Add(new TrackResult(source, id, title, Str(e, "uploader") ?? Str(e, "channel") ?? "SoundCloud", d.GetDouble(), BestThumbnail(e), page));
+                var artist = InputGuard.CleanText(Str(e, "uploader") ?? Str(e, "channel"), 200, "SoundCloud");
+                results.Add(new TrackResult(source, id!, title, artist, duration, InputGuard.SafeThumbnailUrl(BestThumbnail(e)) ?? string.Empty, page));
             }
             else
             {
-                // 11-char ids are videos; skips channels/playlists.
-                if (id.Length != 11)
-                {
-                    continue;
-                }
-
-                var channel = Str(e, "channel") ?? Str(e, "uploader") ?? "YouTube";
-                results.Add(new TrackResult(source, id, title, channel, d.GetDouble(), $"https://i.ytimg.com/vi/{id}/hqdefault.jpg", $"https://www.youtube.com/watch?v={id}"));
+                var channel = InputGuard.CleanText(Str(e, "channel") ?? Str(e, "uploader"), 200, "YouTube");
+                results.Add(new TrackResult(source, id!, title, channel, duration, $"https://i.ytimg.com/vi/{id}/hqdefault.jpg", $"https://www.youtube.com/watch?v={id}"));
             }
         }
 
@@ -149,6 +173,19 @@ public class YtDlpService
     /// </summary>
     public async Task<string> DownloadAsync(TrackResult track, string directory, CancellationToken ct)
     {
+        await _downloadGate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            return await DownloadCoreAsync(track, directory, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            _downloadGate.Release();
+        }
+    }
+
+    private async Task<string> DownloadCoreAsync(TrackResult track, string directory, CancellationToken ct)
+    {
         var bin = await EnsureBinaryAsync(ct).ConfigureAwait(false);
         Directory.CreateDirectory(directory);
         var psi = new ProcessStartInfo(bin)
@@ -173,6 +210,7 @@ public class YtDlpService
             AddCookies(psi);
         }
 
+        psi.ArgumentList.Add("--");
         psi.ArgumentList.Add(track.PageUrl);
 
         using var proc = Process.Start(psi) ?? throw new InvalidOperationException("Could not start yt-dlp");
@@ -193,7 +231,14 @@ public class YtDlpService
         var file = Path.Combine(directory, "audio.m4a");
         if (proc.ExitCode != 0 || !File.Exists(file))
         {
-            throw new DownloadException(ClassifyDownloadError(err));
+            var message = ClassifyDownloadError(err);
+            if (message.StartsWith("Download failed", StringComparison.Ordinal))
+            {
+                // Unrecognised failure: keep the raw yt-dlp output in the server log only.
+                _logger.LogWarning("yt-dlp failed for {Source} {Id}: {Error}", track.Source, track.SourceId, err.Trim());
+            }
+
+            throw new DownloadException(message);
         }
 
         return file;
@@ -207,6 +252,27 @@ public class YtDlpService
     {
         try
         {
+            await _lightGate.WaitAsync(ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            return null;
+        }
+
+        try
+        {
+            return await CheckCoreAsync(track, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            _lightGate.Release();
+        }
+    }
+
+    private async Task<bool?> CheckCoreAsync(TrackResult track, CancellationToken ct)
+    {
+        try
+        {
             var bin = await EnsureBinaryAsync(ct).ConfigureAwait(false);
             var psi = new ProcessStartInfo(bin)
             {
@@ -214,7 +280,7 @@ public class YtDlpService
                 RedirectStandardError = true,
                 UseShellExecute = false,
             };
-            foreach (var a in new[] { "-f", "bestaudio[ext=m4a]", "--simulate", "--no-playlist", "--no-warnings", "-q", track.PageUrl })
+            foreach (var a in new[] { "-f", "bestaudio[ext=m4a]", "--simulate", "--no-playlist", "--no-warnings", "-q", "--", track.PageUrl })
             {
                 psi.ArgumentList.Add(a);
             }
@@ -291,8 +357,7 @@ public class YtDlpService
             return "No m4a audio stream is available for this track.";
         }
 
-        var last = stderr.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).LastOrDefault() ?? "unknown error";
-        return "Download failed: " + (last.Length > 300 ? last[..300] : last);
+        return "Download failed. See the Jellyfin log for details.";
     }
 
     /// <summary>Adds --cookies when a cookie file is available. Use for every yt-dlp call that talks to YouTube.</summary>
@@ -364,6 +429,7 @@ public class YtDlpService
                 return new CheckResult { State = "working", Message = "Cookies are working. YouTube sees you as signed in." };
             }
 
+            _logger.LogWarning("Cookie check failed: {Error}", err.Trim().Length > 500 ? err.Trim()[..500] : err.Trim());
             return ClassifyFailure(err);
         }
         catch (OperationCanceledException)
@@ -390,8 +456,8 @@ public class YtDlpService
             return new CheckResult { State = "failing", Message = "YouTube did not accept the cookies (not signed in or expired). Upload a fresh cookies.txt." };
         }
 
-        var last = stderr.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).LastOrDefault() ?? "unknown error";
-        return new CheckResult { State = "error", Message = "yt-dlp failed: " + (last.Length > 300 ? last[..300] : last) };
+        // Raw output can quote lines of whatever file CookiesPath points at, so it is not shown in the UI.
+        return new CheckResult { State = "error", Message = "yt-dlp could not run the check. See the Jellyfin log for details." };
     }
 
     /// <summary>Runs yt-dlp's built-in updater on the configured channel (nightly by default).</summary>
@@ -419,6 +485,29 @@ public class YtDlpService
         }
 
         _logger.LogInformation("yt-dlp update ({Channel}): {Output}", channel, output.Trim().ReplaceLineEndings(" | "));
+    }
+
+    /// <summary>Fails closed: the binary is only kept if it matches the SHA2-256SUMS published with the release.</summary>
+    private static async Task VerifyChecksumAsync(HttpClient http, string asset, string file, CancellationToken ct)
+    {
+        try
+        {
+            var sums = await http.GetStringAsync("https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/latest/download/SHA2-256SUMS", ct).ConfigureAwait(false);
+            var expected = sums.Split('\n')
+                .Select(l => l.Split(new[] { ' ', '*' }, StringSplitOptions.RemoveEmptyEntries))
+                .FirstOrDefault(p => p.Length == 2 && p[1] == asset)?[0];
+            await using var stream = File.OpenRead(file);
+            var actual = Convert.ToHexString(await System.Security.Cryptography.SHA256.HashDataAsync(stream, ct).ConfigureAwait(false));
+            if (expected is null || !string.Equals(expected, actual, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException("yt-dlp download failed checksum verification");
+            }
+        }
+        catch
+        {
+            File.Delete(file);
+            throw;
+        }
     }
 
     private async Task<string> EnsureBinaryAsync(CancellationToken ct)
@@ -454,6 +543,7 @@ public class YtDlpService
                 await src.CopyToAsync(dst, ct).ConfigureAwait(false);
             }
 
+            await VerifyChecksumAsync(http, asset, tmp, ct).ConfigureAwait(false);
             File.SetUnixFileMode(tmp, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
             File.Move(tmp, target, true);
             return target;

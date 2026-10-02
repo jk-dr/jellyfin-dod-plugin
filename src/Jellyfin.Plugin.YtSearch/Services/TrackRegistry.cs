@@ -98,7 +98,12 @@ public class TrackRegistry
                     var items = JsonSerializer.Deserialize<List<Stored>>(File.ReadAllText(_file)) ?? new();
                     foreach (var s in items)
                     {
-                        var t = _library.WithId(new TrackResult(s.Source, s.SourceId, s.Title, s.Artist, s.Duration, s.Thumb, s.PageUrl));
+                        if (!InputGuard.IsValidSourceId(s.Source, s.SourceId))
+                        {
+                            continue;
+                        }
+
+                        var t = _library.WithId(new TrackResult(s.Source, s.SourceId, InputGuard.CleanText(s.Title, 300, s.SourceId), InputGuard.CleanText(s.Artist, 200, "Unknown"), s.Duration, InputGuard.SafeThumbnailUrl(s.Thumb) ?? string.Empty, InputGuard.SafePageUrl(s.PageUrl) ?? string.Empty));
                         _byId[t.TrackId] = (t, s.LastSeen);
                         _byId[t.AlbumId] = (t, s.LastSeen);
                         if (s.Playable is { } p)

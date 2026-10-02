@@ -8,6 +8,7 @@ using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Jellyfin.Plugin.YtSearch.Services;
 using MediaBrowser.Controller;
+using MediaBrowser.Controller.Net;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 
@@ -36,6 +37,7 @@ public class SearchAppendMiddleware
     private readonly DownloadService _downloads;
     private readonly LibraryService _library;
     private readonly IServerApplicationHost _host;
+    private readonly IAuthorizationContext _auth;
     private readonly ILogger<SearchAppendMiddleware> _logger;
 
     public SearchAppendMiddleware(
@@ -44,8 +46,10 @@ public class SearchAppendMiddleware
         DownloadService downloads,
         LibraryService library,
         IServerApplicationHost host,
+        IAuthorizationContext auth,
         ILogger<SearchAppendMiddleware> logger)
     {
+        _auth = auth;
         _next = next;
         _search = search;
         _downloads = downloads;
@@ -73,9 +77,15 @@ public class SearchAppendMiddleware
         {
             var img = ImagePath.Match(path);
             if (img.Success && Guid.TryParse(img.Groups[2].Value, out var imgId) && _search.TryResolve(imgId, out var imgResult)
-                && imgResult.ThumbnailUrl.Length > 0 && !_library.IsPromoted(imgResult.TrackId))
+                && InputGuard.SafeThumbnailUrl(imgResult.ThumbnailUrl) is { } safeThumb && !_library.IsPromoted(imgResult.TrackId))
             {
-                ctx.Response.Redirect(imgResult.ThumbnailUrl);
+                if (!await IsAuthenticatedAsync(ctx))
+                {
+                    await _next(ctx);
+                    return;
+                }
+
+                ctx.Response.Redirect(safeThumb);
                 return;
             }
 
@@ -83,6 +93,12 @@ public class SearchAppendMiddleware
             if (item.Success && Guid.TryParse(item.Groups[3].Value, out var itemId) && _search.TryResolve(itemId, out var itemResult)
                 && !_library.IsPromoted(itemResult.TrackId))
             {
+                if (!await IsAuthenticatedAsync(ctx))
+                {
+                    await _next(ctx);
+                    return;
+                }
+
                 await WriteJsonAsync(ctx, Item(itemResult, _host.SystemId).ToJsonString());
                 return;
             }
@@ -97,9 +113,10 @@ public class SearchAppendMiddleware
         {
             var isItems = ItemsPath.IsMatch(path);
             var isHints = !isItems && HintsPath.IsMatch(path);
-            var term = req.Query["searchTerm"].ToString().Trim();
+            var term = InputGuard.CleanQuery(req.Query["searchTerm"].ToString());
             if ((isItems || isHints) && term.Length >= 2 && WantsAudio(req)
-                && !(int.TryParse(req.Query["startIndex"], out var start) && start > 0))
+                && !(int.TryParse(req.Query["startIndex"], out var start) && start > 0)
+                && await IsAuthenticatedAsync(ctx))
             {
                 await AppendSearchAsync(ctx, path, term, isHints);
                 return;
@@ -140,9 +157,12 @@ public class SearchAppendMiddleware
             && (req.ContentType?.Contains("json", StringComparison.OrdinalIgnoreCase) ?? false))
         {
             req.EnableBuffering();
-            using (var reader = new StreamReader(req.Body, leaveOpen: true))
+            if (req.ContentLength is null or <= 1_000_000)
             {
-                Collect(await reader.ReadToEndAsync());
+                using var reader = new StreamReader(req.Body, leaveOpen: true);
+                var buf = new char[1_000_000];
+                var n = await reader.ReadBlockAsync(buf, 0, buf.Length);
+                Collect(new string(buf, 0, n));
             }
 
             req.Body.Position = 0;
@@ -158,6 +178,12 @@ public class SearchAppendMiddleware
         }
 
         if (pending.Count == 0)
+        {
+            return true;
+        }
+
+        // Downloading writes to disk, so it needs a logged-in user. Anyone else is passed on to Jellyfin, which answers 401.
+        if (!await IsAuthenticatedAsync(ctx))
         {
             return true;
         }
@@ -184,7 +210,8 @@ public class SearchAppendMiddleware
         var req = ctx.Request;
         if (Plugin.Instance?.Configuration.LogSearchRequests == true)
         {
-            _logger.LogInformation("Search request {Path}{Query}", path, req.QueryString);
+            // Log the term only: the raw query string can contain api_key / token values.
+            _logger.LogInformation("Search request {Path} term='{Term}' types='{Types}'", path, term, req.Query["includeItemTypes"].ToString());
         }
 
         // Start the searches now so they run in parallel with Jellyfin's own search.
@@ -224,6 +251,19 @@ public class SearchAppendMiddleware
 
         ctx.Response.ContentLength = bytes.Length;
         await original.WriteAsync(bytes, ctx.RequestAborted);
+    }
+
+    /// <summary>Our middleware runs before Jellyfin's own auth, so it must check the caller itself before doing any work.</summary>
+    private async Task<bool> IsAuthenticatedAsync(HttpContext ctx)
+    {
+        try
+        {
+            return (await _auth.GetAuthorizationInfo(ctx).ConfigureAwait(false)).IsAuthenticated;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
     }
 
     private static async Task WriteJsonAsync(HttpContext ctx, string json, int status = 200)

@@ -44,8 +44,29 @@ public class LibraryService
     public string Root =>
         Plugin.Instance?.Configuration.LibraryPath is { Length: > 0 } p ? p : Path.Combine(_paths.DataPath, "ytsearch", "library");
 
-    public string PathFor(string source, string sourceId) =>
-        Path.Combine(Root, (source == Sources.SoundCloud ? "sc-" : "yt-") + sourceId + ".m4a");
+    public string PathFor(string source, string sourceId)
+    {
+        // Ids become file names: refuse anything that is not a plain service id (no path separators, no "..").
+        if (!InputGuard.IsValidSourceId(source, sourceId))
+        {
+            throw new ArgumentException("Invalid track id", nameof(sourceId));
+        }
+
+        return Path.Combine(Root, (source == Sources.SoundCloud ? "sc-" : "yt-") + sourceId + ".m4a");
+    }
+
+    /// <summary>True for files this plugin created (and so may delete): yt-*.m4a / sc-*.m4a directly in the library folder.</summary>
+    public bool IsOurFile(string? path) => IsOurFile(Root, path);
+
+    internal static bool IsOurFile(string root, string? path) =>
+        !string.IsNullOrEmpty(path)
+        && string.Equals(Path.GetDirectoryName(path), root.TrimEnd('/'), StringComparison.Ordinal)
+        && OurFileName.IsMatch(Path.GetFileName(path));
+
+    private static readonly System.Text.RegularExpressions.Regex OurFileName = new("^(yt|sc)-[A-Za-z0-9_-]{1,20}\\.m4a$", System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    public long LibrarySizeBytes() =>
+        Directory.Exists(Root) ? new DirectoryInfo(Root).EnumerateFiles("*.m4a").Sum(f => f.Length) : 0;
 
     public TrackResult WithId(TrackResult r) =>
         r with { TrackId = _library.GetNewItemId(PathFor(r.Source, r.SourceId), typeof(Audio)) };
@@ -171,17 +192,41 @@ public class LibraryService
 
     private async Task<string?> DownloadThumbnailAsync(TrackResult r, string audioPath, CancellationToken ct)
     {
-        if (string.IsNullOrEmpty(r.ThumbnailUrl))
+        // Only artwork hosts over https; no redirects (a redirect could point at an internal address); size-capped.
+        if (InputGuard.SafeThumbnailUrl(r.ThumbnailUrl) is not { } url)
         {
             return null;
         }
 
+        const int MaxBytes = 5 * 1024 * 1024;
         try
         {
             var target = Path.ChangeExtension(audioPath, ".jpg");
-            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
-            var bytes = await http.GetByteArrayAsync(r.ThumbnailUrl, ct).ConfigureAwait(false);
-            await File.WriteAllBytesAsync(target, bytes, ct).ConfigureAwait(false);
+            using var http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(20) };
+            using var response = await http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode || response.Content.Headers.ContentLength > MaxBytes)
+            {
+                return null;
+            }
+
+            await using var src = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+            await using var dst = File.Create(target);
+            var buffer = new byte[81920];
+            long total = 0;
+            int read;
+            while ((read = await src.ReadAsync(buffer, ct).ConfigureAwait(false)) > 0)
+            {
+                total += read;
+                if (total > MaxBytes)
+                {
+                    dst.Close();
+                    File.Delete(target);
+                    return null;
+                }
+
+                await dst.WriteAsync(buffer.AsMemory(0, read), ct).ConfigureAwait(false);
+            }
+
             return target;
         }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or IOException)
