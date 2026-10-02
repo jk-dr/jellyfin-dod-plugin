@@ -19,6 +19,9 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
         serviceCollection.AddSingleton<TrackRegistry>();
         serviceCollection.AddSingleton<CleanupService>();
         serviceCollection.AddSingleton<DownloadService>();
+        serviceCollection.AddSingleton<OnlineSearchClient>();
+        serviceCollection.AddSingleton<CatalogClient>();
+        serviceCollection.AddSingleton<AudioTagger>();
         serviceCollection.AddSingleton<SearchService>();
         serviceCollection.AddHostedService<YtDlpUpdater>();
         serviceCollection.AddTransient<IStartupFilter, YtStartupFilter>();

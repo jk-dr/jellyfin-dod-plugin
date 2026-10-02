@@ -17,7 +17,10 @@ public static class RelevanceRanker
     {
         "cover", "remix", "karaoke", "slowed", "reverb", "nightcore", "sped", "8d", "instrumental", "mashup", "bootleg",
         "tutorial", "reaction", "parody", "acoustic", "live", "edit", "bass", "boosted", "tiktok", "mix", "playlist", "hour", "hours",
+        "rehearsal", "performance", "concert", "session", "sessions", "tour", "interview", "teaser", "trailer", "snippet", "preview", "unplugged", "shorts", "behind",
     };
+
+    internal static bool IsNoiseWord(string word) => NoiseWords.Contains(word);
 
     public static IReadOnlyList<TrackResult> Rank(string query, IReadOnlyList<TrackResult> results)
     {

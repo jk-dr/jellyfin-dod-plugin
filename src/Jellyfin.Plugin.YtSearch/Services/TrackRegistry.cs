@@ -11,21 +11,25 @@ using Microsoft.Extensions.Logging;
 namespace Jellyfin.Plugin.YtSearch.Services;
 
 /// <summary>
-/// Remembers every search result by id so clients can still play, download or queue it later,
-/// including after a server restart. Persisted to disk, pruned by age and size.
+/// Remembers every search result by id so clients can still play, download or queue it later, including after a
+/// restart. The first album decision for a track is kept (its id depends on where the file will live), so later
+/// searches never change an id a client already holds. Persisted to disk, pruned by age and size.
 /// </summary>
 public class TrackRegistry
 {
     private const int MaxEntries = 20000;
     private static readonly TimeSpan MaxAge = TimeSpan.FromDays(60);
 
-    private sealed record Stored(string Source, string SourceId, string Title, string Artist, double Duration, string Thumb, string PageUrl, DateTime LastSeen, bool? Playable = null);
+    public sealed record Stored(string Source, string SourceId, string Title, string Artist, double Duration, string Thumb, string PageUrl, DateTime LastSeen, TrackMeta? Meta = null);
+
+    public sealed record FileModel(List<Stored>? Tracks, Dictionary<string, bool>? Playable);
 
     private readonly string _file;
     private readonly ILogger<TrackRegistry> _logger;
     private readonly LibraryService _library;
-    private readonly ConcurrentDictionary<Guid, (TrackResult Track, DateTime LastSeen)> _byId = new();
-    private readonly ConcurrentDictionary<Guid, bool> _playable = new();
+    private readonly ConcurrentDictionary<Guid, TrackResult> _byId = new();
+    private readonly ConcurrentDictionary<string, (TrackResult Track, DateTime LastSeen)> _bySource = new();
+    private readonly ConcurrentDictionary<string, bool> _playable = new();
     private readonly object _saveLock = new();
     private bool _loaded;
     private bool _saveScheduled;
@@ -40,7 +44,14 @@ public class TrackRegistry
     public bool TryGet(Guid id, out TrackResult track)
     {
         EnsureLoaded();
-        if (_byId.TryGetValue(id, out var e))
+        return _byId.TryGetValue(id, out track!);
+    }
+
+    /// <summary>The track as first registered, with the ids and album it was given then.</summary>
+    public bool TryGetBySource(string source, string sourceId, out TrackResult track)
+    {
+        EnsureLoaded();
+        if (_bySource.TryGetValue($"{source}:{sourceId}", out var e))
         {
             track = e.Track;
             return true;
@@ -51,16 +62,16 @@ public class TrackRegistry
     }
 
     /// <summary>Remembered answer to "can this be downloaded?", or null if never checked.</summary>
-    public bool? GetPlayable(Guid trackId)
+    public bool? GetPlayable(string source, string sourceId)
     {
         EnsureLoaded();
-        return _playable.TryGetValue(trackId, out var v) ? v : null;
+        return _playable.TryGetValue($"{source}:{sourceId}", out var v) ? v : null;
     }
 
-    public void SetPlayable(Guid trackId, bool playable)
+    public void SetPlayable(string source, string sourceId, bool playable)
     {
         EnsureLoaded();
-        _playable[trackId] = playable;
+        _playable[$"{source}:{sourceId}"] = playable;
         SaveSoon();
     }
 
@@ -70,8 +81,9 @@ public class TrackRegistry
         var now = DateTime.UtcNow;
         foreach (var t in tracks)
         {
-            _byId[t.TrackId] = (t, now);
-            _byId[t.AlbumId] = (t, now);
+            var entry = _bySource.AddOrUpdate(t.Key, _ => (t, now), (_, old) => (old.Track, now));
+            _byId[entry.Track.TrackId] = entry.Track;
+            _byId[entry.Track.AlbumId] = entry.Track;
         }
 
         SaveSoon();
@@ -95,21 +107,33 @@ public class TrackRegistry
             {
                 if (File.Exists(_file))
                 {
-                    var items = JsonSerializer.Deserialize<List<Stored>>(File.ReadAllText(_file)) ?? new();
-                    foreach (var s in items)
+                    var text = File.ReadAllText(_file);
+                    var model = text.TrimStart().StartsWith('[')
+                        ? new FileModel(JsonSerializer.Deserialize<List<Stored>>(text), null) // older format
+                        : JsonSerializer.Deserialize<FileModel>(text);
+                    foreach (var s in model?.Tracks ?? new List<Stored>())
                     {
                         if (!InputGuard.IsValidSourceId(s.Source, s.SourceId))
                         {
                             continue;
                         }
 
-                        var t = _library.WithId(new TrackResult(s.Source, s.SourceId, InputGuard.CleanText(s.Title, 300, s.SourceId), InputGuard.CleanText(s.Artist, 200, "Unknown"), s.Duration, InputGuard.SafeThumbnailUrl(s.Thumb) ?? string.Empty, InputGuard.SafePageUrl(s.PageUrl) ?? string.Empty));
-                        _byId[t.TrackId] = (t, s.LastSeen);
-                        _byId[t.AlbumId] = (t, s.LastSeen);
-                        if (s.Playable is { } p)
-                        {
-                            _playable[t.TrackId] = p;
-                        }
+                        var t = _library.WithId(new TrackResult(
+                            s.Source,
+                            s.SourceId,
+                            InputGuard.CleanText(s.Title, 300, s.SourceId),
+                            InputGuard.CleanText(s.Artist, 200, "Unknown"),
+                            s.Duration,
+                            InputGuard.SafeThumbnailUrl(s.Thumb) ?? string.Empty,
+                            InputGuard.SafePageUrl(s.PageUrl) ?? string.Empty) { Meta = Sanitize(s.Meta) });
+                        _bySource[t.Key] = (t, s.LastSeen);
+                        _byId[t.TrackId] = t;
+                        _byId[t.AlbumId] = t;
+                    }
+
+                    foreach (var kv in model?.Playable ?? new Dictionary<string, bool>())
+                    {
+                        _playable[kv.Key] = kv.Value;
                     }
                 }
             }
@@ -121,6 +145,19 @@ public class TrackRegistry
             _loaded = true;
         }
     }
+
+    private static TrackMeta? Sanitize(TrackMeta? m) => m is null
+        ? null
+        : new TrackMeta(
+            InputGuard.CleanText(m.Title, 300, "Unknown"),
+            InputGuard.CleanText(m.Artist, 200, "Unknown"),
+            InputGuard.CleanText(m.Album, 200, "Unknown"),
+            InputGuard.CleanText(m.AlbumArtist, 200, "Unknown"),
+            m.Year,
+            m.TrackNumber,
+            m.DiscNumber,
+            m.Genre is null ? null : InputGuard.CleanText(m.Genre, 60, "Music"),
+            InputGuard.SafeThumbnailUrl(m.ArtworkUrl));
 
     /// <summary>Saves a few seconds from now; changes arriving in the meantime ride along in that one save.</summary>
     private void SaveSoon()
@@ -152,16 +189,14 @@ public class TrackRegistry
         try
         {
             var cutoff = DateTime.UtcNow - MaxAge;
-            var rows = _byId.Values
+            var rows = _bySource.Values
                 .Where(v => v.LastSeen >= cutoff)
-                .GroupBy(v => v.Track.TrackId)
-                .Select(g => g.First())
                 .OrderByDescending(v => v.LastSeen)
                 .Take(MaxEntries)
-                .Select(v => new Stored(v.Track.Source, v.Track.SourceId, v.Track.Title, v.Track.Artist, v.Track.DurationSeconds, v.Track.ThumbnailUrl, v.Track.PageUrl, v.LastSeen, _playable.TryGetValue(v.Track.TrackId, out var pl) ? pl : null))
+                .Select(v => new Stored(v.Track.Source, v.Track.SourceId, v.Track.Title, v.Track.Artist, v.Track.DurationSeconds, v.Track.ThumbnailUrl, v.Track.PageUrl, v.LastSeen, v.Track.Meta))
                 .ToList();
             Directory.CreateDirectory(Path.GetDirectoryName(_file)!);
-            File.WriteAllText(_file + ".tmp", JsonSerializer.Serialize(rows));
+            File.WriteAllText(_file + ".tmp", JsonSerializer.Serialize(new FileModel(rows, new Dictionary<string, bool>(_playable))));
             File.Move(_file + ".tmp", _file, true);
         }
         catch (Exception ex)

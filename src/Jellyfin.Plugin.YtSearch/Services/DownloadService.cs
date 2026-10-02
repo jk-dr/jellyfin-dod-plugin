@@ -17,15 +17,17 @@ public class DownloadService
     private readonly YtDlpService _ytdlp;
     private readonly LibraryService _library;
     private readonly CleanupService _cleanup;
+    private readonly AudioTagger _tagger;
     private readonly IApplicationPaths _paths;
     private readonly ILogger<DownloadService> _logger;
     private readonly ConcurrentDictionary<Guid, Task> _inFlight = new();
 
-    public DownloadService(YtDlpService ytdlp, LibraryService library, CleanupService cleanup, IApplicationPaths paths, ILogger<DownloadService> logger)
+    public DownloadService(YtDlpService ytdlp, LibraryService library, CleanupService cleanup, AudioTagger tagger, IApplicationPaths paths, ILogger<DownloadService> logger)
     {
         _ytdlp = ytdlp;
         _library = library;
         _cleanup = cleanup;
+        _tagger = tagger;
         _paths = paths;
         _logger = logger;
     }
@@ -81,7 +83,8 @@ public class DownloadService
             using var cts = new CancellationTokenSource(timeout);
             _logger.LogInformation("Downloading {Source} '{Title}' ({Id})", track.Source, track.Title, track.SourceId);
             var file = await _ytdlp.DownloadAsync(track, tmp, cts.Token).ConfigureAwait(false);
-            await _library.PromoteAsync(track, file, CancellationToken.None).ConfigureAwait(false);
+            var tagged = await _tagger.TagAsync(file, track, tmp, cts.Token).ConfigureAwait(false);
+            await _library.PromoteAsync(track, tagged, CancellationToken.None).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {

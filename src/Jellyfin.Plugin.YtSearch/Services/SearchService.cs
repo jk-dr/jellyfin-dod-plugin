@@ -8,18 +8,22 @@ using Microsoft.Extensions.Logging;
 
 namespace Jellyfin.Plugin.YtSearch.Services;
 
-/// <summary>Cached multi-source search plus an id registry so virtual ids can be resolved later.</summary>
+/// <summary>Cached multi-source search, ranked by relevance and enriched with real album metadata.</summary>
 public class SearchService
 {
     private readonly YtDlpService _ytdlp;
+    private readonly OnlineSearchClient _online;
+    private readonly CatalogClient _catalog;
     private readonly LibraryService _library;
     private readonly TrackRegistry _registry;
     private readonly ILogger<SearchService> _logger;
     private readonly ConcurrentDictionary<string, (DateTime Expires, Task<IReadOnlyList<TrackResult>> Task)> _cache = new();
 
-    public SearchService(YtDlpService ytdlp, LibraryService library, TrackRegistry registry, ILogger<SearchService> logger)
+    public SearchService(YtDlpService ytdlp, OnlineSearchClient online, CatalogClient catalog, LibraryService library, TrackRegistry registry, ILogger<SearchService> logger)
     {
         _ytdlp = ytdlp;
+        _online = online;
+        _catalog = catalog;
         _library = library;
         _registry = registry;
         _logger = logger;
@@ -27,11 +31,11 @@ public class SearchService
 
     public bool TryResolve(Guid id, out TrackResult result) => _registry.TryGet(id, out result);
 
-    /// <summary>Searches every enabled source in parallel and returns the results ordered by relevance to the query.</summary>
+    /// <summary>Searches every enabled source in parallel; results come back ordered by relevance, with album metadata where known.</summary>
     public async Task<IReadOnlyList<TrackResult>> SearchAsync(string query, CancellationToken ct)
     {
         query = InputGuard.CleanQuery(query);
-        if (query.Length < 2)
+        if (query.Length < 3)
         {
             return Array.Empty<TrackResult>();
         }
@@ -46,8 +50,25 @@ public class SearchService
             tasks.Add(SearchSourceAsync(Sources.SoundCloud, query, Math.Clamp(cfg?.SoundCloudMaxResults ?? 10, 0, 50), ct));
         }
 
-        var all = await Task.WhenAll(tasks).ConfigureAwait(false);
-        return RelevanceRanker.Rank(query, all.SelectMany(r => r).ToList());
+        var raw = (await Task.WhenAll(tasks).ConfigureAwait(false)).SelectMany(r => r).ToList();
+        var ranked = RelevanceRanker.Rank(query, raw);
+        var meta = await _catalog.GetMetaAsync(query, ranked, ct).ConfigureAwait(false);
+
+        // A track keeps the album (and so the id) it was first given; new ones get the catalog match if there is one.
+        // Songs with a real album are the canonical copy, so they go first (stable: relevance order is otherwise kept).
+        var finals = ranked.Select(r =>
+        {
+            if (_registry.TryGetBySource(r.Source, r.SourceId, out var known))
+            {
+                return known;
+            }
+
+            return _library.WithId(meta.TryGetValue(r.Key, out var m)
+                ? r with { Meta = m, ThumbnailUrl = m.ArtworkUrl ?? r.ThumbnailUrl }
+                : r);
+        }).OrderBy(r => r.Meta is { } m && !MetadataMatcher.IsSpecialEditionName(m.Album) ? 0 : 1).ToList();
+        _registry.Add(finals);
+        return finals;
     }
 
     /// <summary>One source; a failure is logged and yields no results so the other sources still show.</summary>
@@ -111,25 +132,29 @@ public class SearchService
         using var gate = new SemaphoreSlim(10);
         var verdicts = await Task.WhenAll(tracks.Select(async t =>
         {
-            if (_registry.GetPlayable(t.TrackId) is { } known)
+            if (_registry.GetPlayable(t.Source, t.SourceId) is { } known)
             {
                 return known;
             }
 
-            await gate.WaitAsync(cts.Token).ConfigureAwait(false);
+            try
+            {
+                await gate.WaitAsync(cts.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                return true;
+            }
+
             try
             {
                 var ok = await _ytdlp.CheckDownloadableAsync(t, cts.Token).ConfigureAwait(false);
                 if (ok.HasValue)
                 {
-                    _registry.SetPlayable(t.TrackId, ok.Value);
+                    _registry.SetPlayable(t.Source, t.SourceId, ok.Value);
                 }
 
                 return ok ?? true;
-            }
-            catch (OperationCanceledException)
-            {
-                return true;
             }
             finally
             {
@@ -150,19 +175,37 @@ public class SearchService
     {
         var timeout = TimeSpan.FromSeconds(Math.Max(Plugin.Instance?.Configuration.SearchTimeoutSeconds ?? 8, 1));
         using var cts = new CancellationTokenSource(timeout);
-        var raw = await _ytdlp.SearchAsync(source, query, max, cts.Token).ConfigureAwait(false);
-        var results = raw.Select(_library.WithId).ToList();
-        var shown = results;
-        if (source == Sources.SoundCloud && (Plugin.Instance?.Configuration.HideUnplayableSoundCloud ?? true))
+        var hide = source == Sources.SoundCloud && (Plugin.Instance?.Configuration.HideUnplayableSoundCloud ?? true);
+
+        // Fast path: ask the site's search endpoint directly. Anything unexpected falls back to yt-dlp.
+        IReadOnlyList<TrackResult>? raw = null;
+        var viaApi = false;
+        try
         {
-            shown = await FilterPlayableAsync(results).ConfigureAwait(false);
+            raw = source == Sources.SoundCloud
+                ? await _online.SearchSoundCloudAsync(query, max, hide, cts.Token).ConfigureAwait(false)
+                : await _online.SearchYouTubeAsync(query, max, cts.Token).ConfigureAwait(false);
+            viaApi = raw is not null;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !cts.IsCancellationRequested)
+        {
+            _logger.LogInformation("{Source} direct search failed ({Message}); using yt-dlp", source, ex.Message);
         }
 
-        // Hidden tracks are registered too, so their "can't download" verdict is remembered across restarts.
-        _registry.Add(results);
-        results = shown;
+        if (raw is null)
+        {
+            using var fallback = new CancellationTokenSource(timeout);
+            raw = await _ytdlp.SearchAsync(source, query, max, fallback.Token).ConfigureAwait(false);
+        }
 
-        _logger.LogInformation("{Source} search '{Query}' -> {Count} results", source, query, results.Count);
+        var results = raw.ToList();
+        if (hide && !viaApi)
+        {
+            // yt-dlp's flat search does not say which tracks are DRM/preview-only, so check them one by one.
+            results = await FilterPlayableAsync(results).ConfigureAwait(false);
+        }
+
+        _logger.LogInformation("{Source} search '{Query}' -> {Count} results ({Via})", source, query, results.Count, viaApi ? "direct" : "yt-dlp");
         return results;
     }
 }

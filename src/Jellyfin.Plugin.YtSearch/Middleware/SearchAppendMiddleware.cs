@@ -340,45 +340,67 @@ public class SearchAppendMiddleware
 
     private static string N(Guid g) => g.ToString("N");
 
-    internal static JsonObject Item(TrackResult r, string serverId) => new()
+    internal static JsonObject Item(TrackResult r, string serverId)
     {
-        ["Name"] = r.Title,
-        ["ServerId"] = serverId,
-        ["Id"] = N(r.TrackId),
-        ["CanDelete"] = false,
-        ["CanDownload"] = true,
-        ["RunTimeTicks"] = r.RunTimeTicks,
-        ["ProductionYear"] = null,
-        ["IsFolder"] = false,
-        ["Type"] = "Audio",
-        ["MediaType"] = "Audio",
-        ["Artists"] = new JsonArray(r.Artist),
-        ["ArtistItems"] = new JsonArray(new JsonObject { ["Name"] = r.Artist, ["Id"] = N(r.ArtistId) }),
-        ["Album"] = r.Title,
-        ["AlbumId"] = N(r.AlbumId),
-        ["AlbumArtist"] = r.Artist,
-        ["AlbumArtists"] = new JsonArray(new JsonObject { ["Name"] = r.Artist, ["Id"] = N(r.ArtistId) }),
-        ["ImageTags"] = new JsonObject { ["Primary"] = r.ImageTag },
-        ["BackdropImageTags"] = new JsonArray(),
-        ["AlbumPrimaryImageTag"] = r.ImageTag,
-        ["LocationType"] = "FileSystem",
-        ["UserData"] = new JsonObject { ["PlaybackPositionTicks"] = 0, ["PlayCount"] = 0, ["IsFavorite"] = false, ["Played"] = false, ["Key"] = N(r.TrackId) },
-    };
+        var item = new JsonObject
+        {
+            ["Name"] = r.DisplayTitle,
+            ["ServerId"] = serverId,
+            ["Id"] = N(r.TrackId),
+            ["CanDelete"] = false,
+            ["CanDownload"] = true,
+            ["RunTimeTicks"] = r.RunTimeTicks,
+            ["ProductionYear"] = r.Meta?.Year,
+            ["IndexNumber"] = r.Meta?.TrackNumber,
+            ["ParentIndexNumber"] = r.Meta?.DiscNumber,
+            ["IsFolder"] = false,
+            ["Type"] = "Audio",
+            ["MediaType"] = "Audio",
+            ["Artists"] = new JsonArray(r.DisplayArtist),
+            ["ArtistItems"] = new JsonArray(new JsonObject { ["Name"] = r.DisplayArtist, ["Id"] = N(r.ArtistId) }),
+            ["AlbumArtist"] = r.DisplayAlbumArtist,
+            ["AlbumArtists"] = new JsonArray(new JsonObject { ["Name"] = r.DisplayAlbumArtist, ["Id"] = N(r.ArtistId) }),
+            ["ImageTags"] = new JsonObject { ["Primary"] = r.ImageTag },
+            ["BackdropImageTags"] = new JsonArray(),
+            ["LocationType"] = "FileSystem",
+            ["UserData"] = new JsonObject { ["PlaybackPositionTicks"] = 0, ["PlayCount"] = 0, ["IsFavorite"] = false, ["Played"] = false, ["Key"] = N(r.TrackId) },
+        };
 
-    private static JsonObject Hint(TrackResult r, string term) => new()
+        // Only claim an album when a real one is known; otherwise it is a loose track, like any untagged file.
+        if (r.Meta is { } m)
+        {
+            item["Album"] = m.Album;
+            item["AlbumId"] = N(r.AlbumId);
+            item["AlbumPrimaryImageTag"] = r.ImageTag;
+        }
+
+        return item;
+    }
+
+    private static JsonObject Hint(TrackResult r, string term)
     {
-        ["ItemId"] = N(r.TrackId),
-        ["Id"] = N(r.TrackId),
-        ["Name"] = r.Title,
-        ["MatchedTerm"] = term,
-        ["PrimaryImageTag"] = r.ImageTag,
-        ["Type"] = "Audio",
-        ["IsFolder"] = false,
-        ["RunTimeTicks"] = r.RunTimeTicks,
-        ["MediaType"] = "Audio",
-        ["Album"] = r.Title,
-        ["AlbumId"] = N(r.AlbumId),
-        ["AlbumArtist"] = r.Artist,
-        ["Artists"] = new JsonArray(r.Artist),
-    };
+        var hint = new JsonObject
+        {
+            ["ItemId"] = N(r.TrackId),
+            ["Id"] = N(r.TrackId),
+            ["Name"] = r.DisplayTitle,
+            ["MatchedTerm"] = term,
+            ["PrimaryImageTag"] = r.ImageTag,
+            ["Type"] = "Audio",
+            ["IsFolder"] = false,
+            ["RunTimeTicks"] = r.RunTimeTicks,
+            ["MediaType"] = "Audio",
+            ["IndexNumber"] = r.Meta?.TrackNumber,
+            ["ProductionYear"] = r.Meta?.Year,
+            ["AlbumArtist"] = r.DisplayAlbumArtist,
+            ["Artists"] = new JsonArray(r.DisplayArtist),
+        };
+        if (r.Meta is { } m)
+        {
+            hint["Album"] = m.Album;
+            hint["AlbumId"] = N(r.AlbumId);
+        }
+
+        return hint;
+    }
 }

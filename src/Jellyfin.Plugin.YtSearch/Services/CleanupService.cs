@@ -130,6 +130,11 @@ public class CleanupService
                 }
             }
 
+            if (deleted > 0)
+            {
+                await _libraryService.PruneEmptyFoldersAsync(CancellationToken.None).ConfigureAwait(false);
+            }
+
             return deleted;
         }
         finally

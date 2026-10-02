@@ -13,7 +13,7 @@ public static class InputGuard
     private static readonly Regex SoundCloudId = new("^[0-9]{1,20}$", RegexOptions.Compiled);
 
     // Hosts that are allowed to serve artwork / be passed to yt-dlp. Anything else (internal addresses, other sites) is dropped.
-    private static readonly string[] ThumbnailHosts = { "ytimg.com", "ggpht.com", "googleusercontent.com", "sndcdn.com" };
+    private static readonly string[] ThumbnailHosts = { "ytimg.com", "ggpht.com", "googleusercontent.com", "sndcdn.com", "mzstatic.com" };
     private static readonly string[] PageHosts = { "youtube.com", "soundcloud.com" };
 
     /// <summary>Ids end up in file names, so only the exact alphabets of each service are accepted (no '/', '..', etc.).</summary>
@@ -47,6 +47,19 @@ public static class InputGuard
         }
 
         return cleaned.Length > max ? cleaned[..max] : cleaned;
+    }
+
+    /// <summary>A single folder name from untrusted text: no separators or control characters, never "." or "..", capped length.</summary>
+    public static string SafeFolderName(string? text, int max = 100)
+    {
+        var chars = (text ?? string.Empty).Select(c => char.IsControl(c) || "\\/:*?\"<>|".Contains(c) ? ' ' : c).ToArray();
+        var cleaned = Regex.Replace(Regex.Replace(new string(chars), @"\s+", " "), @"\.{2,}", ".").Trim().Trim('.').Trim();
+        if (cleaned.Length > max)
+        {
+            cleaned = cleaned[..max].Trim().Trim('.').Trim();
+        }
+
+        return cleaned.Length == 0 ? "Unknown" : cleaned;
     }
 
     public static string? SafeThumbnailUrl(string? url) => SafeUrl(url, ThumbnailHosts);
