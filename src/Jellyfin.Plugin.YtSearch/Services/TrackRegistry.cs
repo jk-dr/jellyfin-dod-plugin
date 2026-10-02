@@ -20,7 +20,7 @@ public class TrackRegistry
     private const int MaxEntries = 20000;
     private static readonly TimeSpan MaxAge = TimeSpan.FromDays(60);
 
-    public sealed record Stored(string Source, string SourceId, string Title, string Artist, double Duration, string Thumb, string PageUrl, DateTime LastSeen, TrackMeta? Meta = null);
+    public sealed record Stored(string Source, string SourceId, string Title, string Artist, double Duration, string Thumb, string PageUrl, DateTime LastSeen, TrackMeta? Meta = null, string? Folder = null);
 
     public sealed record FileModel(List<Stored>? Tracks, Dictionary<string, bool>? Playable);
 
@@ -45,6 +45,23 @@ public class TrackRegistry
     {
         EnsureLoaded();
         return _byId.TryGetValue(id, out track!);
+    }
+
+    /// <summary>All known tracks of one (not yet existing) album.</summary>
+    public IReadOnlyList<TrackResult> TracksOfAlbum(Guid albumId)
+    {
+        EnsureLoaded();
+        return _bySource.Values.Select(v => v.Track).Where(t => t.Meta is not null && t.AlbumId == albumId).OrderBy(t => t.Meta!.DiscNumber ?? 1).ThenBy(t => t.Meta!.TrackNumber ?? 999).ThenBy(t => t.DisplayTitle).ToList();
+    }
+
+    /// <summary>Overrides the placement of a track (the user put it in an album of their choosing).</summary>
+    public void Replace(TrackResult placed)
+    {
+        EnsureLoaded();
+        _bySource[placed.Key] = (placed, DateTime.UtcNow);
+        _byId[placed.TrackId] = placed;
+        _byId[placed.AlbumId] = placed;
+        SaveSoon();
     }
 
     /// <summary>The track as first registered, with the ids and album it was given then.</summary>
@@ -125,7 +142,7 @@ public class TrackRegistry
                             InputGuard.CleanText(s.Artist, 200, "Unknown"),
                             s.Duration,
                             InputGuard.SafeThumbnailUrl(s.Thumb) ?? string.Empty,
-                            InputGuard.SafePageUrl(s.PageUrl) ?? string.Empty) { Meta = Sanitize(s.Meta) });
+                            InputGuard.SafePageUrl(s.PageUrl) ?? string.Empty) { Meta = Sanitize(s.Meta), FolderOverride = SafeFolder(s.Folder) });
                         _bySource[t.Key] = (t, s.LastSeen);
                         _byId[t.TrackId] = t;
                         _byId[t.AlbumId] = t;
@@ -145,6 +162,10 @@ public class TrackRegistry
             _loaded = true;
         }
     }
+
+    /// <summary>A stored folder is only trusted if it is a plain absolute path to an existing directory.</summary>
+    private static string? SafeFolder(string? folder) =>
+        folder is { Length: > 0 } && Path.IsPathRooted(folder) && !folder.Contains("..", StringComparison.Ordinal) && Directory.Exists(folder) ? folder : null;
 
     private static TrackMeta? Sanitize(TrackMeta? m) => m is null
         ? null
@@ -193,7 +214,7 @@ public class TrackRegistry
                 .Where(v => v.LastSeen >= cutoff)
                 .OrderByDescending(v => v.LastSeen)
                 .Take(MaxEntries)
-                .Select(v => new Stored(v.Track.Source, v.Track.SourceId, v.Track.Title, v.Track.Artist, v.Track.DurationSeconds, v.Track.ThumbnailUrl, v.Track.PageUrl, v.LastSeen, v.Track.Meta))
+                .Select(v => new Stored(v.Track.Source, v.Track.SourceId, v.Track.Title, v.Track.Artist, v.Track.DurationSeconds, v.Track.ThumbnailUrl, v.Track.PageUrl, v.LastSeen, v.Track.Meta, v.Track.FolderOverride))
                 .ToList();
             Directory.CreateDirectory(Path.GetDirectoryName(_file)!);
             File.WriteAllText(_file + ".tmp", JsonSerializer.Serialize(new FileModel(rows, new Dictionary<string, bool>(_playable))));

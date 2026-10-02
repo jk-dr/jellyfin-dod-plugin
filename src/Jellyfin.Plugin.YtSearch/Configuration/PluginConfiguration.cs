@@ -37,6 +37,13 @@ public class PluginConfiguration : BasePluginConfiguration
     /// <summary>Hide SoundCloud results that can't be downloaded (DRM / preview-only).</summary>
     public bool HideUnplayableSoundCloud { get; set; } = true;
 
+    /// <summary>"auto": the real album when known, loose otherwise. "fixed": every download goes into <see cref="FixedAlbumName"/>.</summary>
+    public string AlbumMode { get; set; } = "auto";
+
+    public string FixedAlbumName { get; set; } = "YouTube & SoundCloud";
+
+    public string FixedAlbumArtist { get; set; } = "Various Artists";
+
     /// <summary>Look up the real album, track number, year and cover art of songs (Apple iTunes Search, no key).</summary>
     public bool LookUpAlbums { get; set; } = true;
 

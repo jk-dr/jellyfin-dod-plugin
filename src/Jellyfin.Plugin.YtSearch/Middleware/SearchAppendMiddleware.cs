@@ -99,19 +99,50 @@ public class SearchAppendMiddleware
             if (img.Success && Guid.TryParse(img.Groups[2].Value, out var imgId) && _search.TryResolve(imgId, out var imgResult)
                 && InputGuard.SafeThumbnailUrl(imgResult.ThumbnailUrl) is { } safeThumb && !_library.IsPromoted(imgResult.TrackId))
             {
+                // No login check, on purpose: Jellyfin serves artwork anonymously and apps fetch images without credentials.
+                // This only redirects to a public cover image of an allowlisted host, for ids we handed out ourselves.
+                ctx.Response.Redirect(safeThumb);
+                return;
+            }
+
+            // The album of a search result that is not in the library yet: an album page listing the known songs of it.
+            var albumItem = ItemPath.Match(path);
+            if (albumItem.Success && Guid.TryParse(albumItem.Groups[3].Value, out var albumId) && _search.TryResolve(albumId, out var albumTrack)
+                && albumTrack.Meta is not null && albumId == albumTrack.AlbumId && _library.GetItem(albumId) is null)
+            {
                 if (!await IsAuthenticatedAsync(ctx))
                 {
                     await _next(ctx);
                     return;
                 }
 
-                ctx.Response.Redirect(safeThumb);
+                await WriteJsonAsync(ctx, Album(albumTrack, _host.SystemId, _search.TracksOfAlbum(albumId)).ToJsonString());
+                return;
+            }
+
+            if (ItemsPath.IsMatch(path) && Guid.TryParse(req.Query["parentId"].ToString(), out var parentAlbum)
+                && _search.TryResolve(parentAlbum, out var parentTrack) && parentTrack.Meta is not null && parentAlbum == parentTrack.AlbumId
+                && _library.GetItem(parentAlbum) is null)
+            {
+                if (!await IsAuthenticatedAsync(ctx))
+                {
+                    await _next(ctx);
+                    return;
+                }
+
+                var children = new JsonArray();
+                foreach (var t in _search.TracksOfAlbum(parentAlbum))
+                {
+                    children.Add(Item(t, _host.SystemId));
+                }
+
+                await WriteJsonAsync(ctx, new JsonObject { ["Items"] = children, ["TotalRecordCount"] = children.Count, ["StartIndex"] = 0 }.ToJsonString());
                 return;
             }
 
             var item = ItemPath.Match(path);
             if (item.Success && Guid.TryParse(item.Groups[3].Value, out var itemId) && _search.TryResolve(itemId, out var itemResult)
-                && !_library.IsPromoted(itemResult.TrackId))
+                && itemId == itemResult.TrackId && !_library.IsPromoted(itemResult.TrackId))
             {
                 if (!await IsAuthenticatedAsync(ctx))
                 {
@@ -337,6 +368,25 @@ public class SearchAppendMiddleware
         root["TotalRecordCount"] = (root["TotalRecordCount"]?.GetValue<int>() ?? existing) + fresh.Count;
         return System.Text.Encoding.UTF8.GetBytes(root.ToJsonString());
     }
+
+    internal static JsonObject Album(TrackResult r, string serverId, IReadOnlyList<TrackResult> tracks) => new()
+    {
+        ["Name"] = r.Meta!.Album,
+        ["ServerId"] = serverId,
+        ["Id"] = N(r.AlbumId),
+        ["Type"] = "MusicAlbum",
+        ["IsFolder"] = true,
+        ["AlbumArtist"] = r.DisplayAlbumArtist,
+        ["AlbumArtists"] = new JsonArray(new JsonObject { ["Name"] = r.DisplayAlbumArtist, ["Id"] = N(r.ArtistId) }),
+        ["ArtistItems"] = new JsonArray(new JsonObject { ["Name"] = r.DisplayAlbumArtist, ["Id"] = N(r.ArtistId) }),
+        ["ProductionYear"] = r.Meta.Year,
+        ["ChildCount"] = Math.Max(1, tracks.Count),
+        ["RunTimeTicks"] = tracks.Sum(t => t.RunTimeTicks),
+        ["ImageTags"] = new JsonObject { ["Primary"] = r.ImageTag },
+        ["BackdropImageTags"] = new JsonArray(),
+        ["CanDelete"] = false,
+        ["UserData"] = new JsonObject { ["PlaybackPositionTicks"] = 0, ["PlayCount"] = 0, ["IsFavorite"] = false, ["Played"] = false },
+    };
 
     private static string N(Guid g) => g.ToString("N");
 

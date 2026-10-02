@@ -31,6 +31,18 @@ public class SearchRow
     public int Seconds { get; set; }
 }
 
+public class AlbumRow
+{
+    [System.Text.Json.Serialization.JsonPropertyName("id")]
+    public string Id { get; set; } = string.Empty;
+
+    [System.Text.Json.Serialization.JsonPropertyName("name")]
+    public string Name { get; set; } = string.Empty;
+
+    [System.Text.Json.Serialization.JsonPropertyName("artist")]
+    public string Artist { get; set; } = string.Empty;
+}
+
 public class AddResult
 {
     [System.Text.Json.Serialization.JsonPropertyName("ok")]
@@ -57,9 +69,11 @@ public class YtSearchController : ControllerBase
     private readonly SearchService _search;
     private readonly DownloadService _downloads;
     private readonly FailureLog _failures;
+    private readonly LibraryService _library;
 
-    public YtSearchController(CookieService cookies, YtDlpService ytdlp, SearchService search, DownloadService downloads, FailureLog failures)
+    public YtSearchController(CookieService cookies, YtDlpService ytdlp, SearchService search, DownloadService downloads, FailureLog failures, LibraryService library)
     {
+        _library = library;
         _cookies = cookies;
         _ytdlp = ytdlp;
         _search = search;
@@ -87,23 +101,72 @@ public class YtSearchController : ControllerBase
         }).ToList());
     }
 
-    /// <summary>Downloads a search result into the library now, so apps that only show their synced library (Manet) get it on the next sync.</summary>
+    /// <summary>Albums the user can put a download into.</summary>
+    [HttpGet("Albums")]
+    public ActionResult<IReadOnlyList<AlbumRow>> GetAlbums() =>
+        Ok(_library.ListAlbums().Select(a => new AlbumRow { Id = a.Id.ToString("N"), Name = a.Name, Artist = a.Artist }).ToList());
+
+    /// <summary>
+    /// Downloads a search result into the library now. Without a destination it goes where the settings say; with
+    /// <paramref name="albumId"/> it goes into that existing album; with <paramref name="album"/> into a new or same-named
+    /// album under the plugin's library.
+    /// </summary>
     [HttpPost("Add")]
-    public async Task<ActionResult<AddResult>> Add([FromQuery] string id, CancellationToken ct)
+    public async Task<ActionResult<AddResult>> Add([FromQuery] string id, [FromQuery] string? albumId, [FromQuery] string? album, [FromQuery] string? albumArtist, CancellationToken ct)
     {
         if (!System.Guid.TryParse(id, out var guid) || !_search.TryResolve(guid, out var track) || track.TrackId != guid)
         {
             return NotFound(new ProblemDetails { Title = "Unknown track", Detail = "Search again, then add it.", Status = StatusCodes.Status404NotFound });
         }
 
+        var placed = track;
+        if (!string.IsNullOrWhiteSpace(albumId))
+        {
+            if (!System.Guid.TryParse(albumId, out var albumGuid) || _library.ResolveAlbumFolder(albumGuid) is not { } target)
+            {
+                return Ok(new AddResult { Ok = false, Message = "That album could not be found, or its folder is missing." });
+            }
+
+            if (!CanWrite(target.Folder))
+            {
+                return Ok(new AddResult { Ok = false, Message = "Jellyfin can't write to that album's folder (read-only?)." });
+            }
+
+            placed = _library.WithId(track with { Meta = AlbumPolicy.Place(track, target.Name, target.Artist.Length > 0 ? target.Artist : track.DisplayArtist), FolderOverride = target.Folder });
+        }
+        else if (!string.IsNullOrWhiteSpace(album))
+        {
+            placed = _library.WithId(track with { Meta = AlbumPolicy.Place(track, album, string.IsNullOrWhiteSpace(albumArtist) ? track.DisplayArtist : albumArtist), FolderOverride = null });
+        }
+
+        if (!ReferenceEquals(placed, track))
+        {
+            _search.Replace(placed);
+        }
+
         try
         {
-            await _downloads.EnsureAsync(track, ct);
-            return Ok(new AddResult { Ok = true, Message = "Added to the library." });
+            await _downloads.EnsureAsync(placed, ct);
+            return Ok(new AddResult { Ok = true, Message = placed.Meta is { } m ? $"Added to \"{m.Album}\"." : "Added to the library." });
         }
         catch (DownloadException ex)
         {
             return Ok(new AddResult { Ok = false, Message = ex.Message });
+        }
+    }
+
+    private static bool CanWrite(string folder)
+    {
+        try
+        {
+            var probe = System.IO.Path.Combine(folder, "." + System.Guid.NewGuid().ToString("N") + ".tmp");
+            System.IO.File.WriteAllBytes(probe, System.Array.Empty<byte>());
+            System.IO.File.Delete(probe);
+            return true;
+        }
+        catch (System.Exception)
+        {
+            return false;
         }
     }
 

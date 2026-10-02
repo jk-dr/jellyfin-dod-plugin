@@ -31,6 +31,11 @@ public class SearchService
 
     public bool TryResolve(Guid id, out TrackResult result) => _registry.TryGet(id, out result);
 
+    public IReadOnlyList<TrackResult> TracksOfAlbum(Guid albumId) => _registry.TracksOfAlbum(albumId);
+
+    /// <summary>Records where the user chose to put a track, so later searches and plays use that placement.</summary>
+    public void Replace(TrackResult placed) => _registry.Replace(placed);
+
     /// <summary>Searches every enabled source in parallel; results come back ordered by relevance, with album metadata where known.</summary>
     public async Task<IReadOnlyList<TrackResult>> SearchAsync(string query, CancellationToken ct)
     {
@@ -54,8 +59,10 @@ public class SearchService
         var ranked = RelevanceRanker.Rank(query, raw);
         var meta = await _catalog.GetMetaAsync(query, ranked, ct).ConfigureAwait(false);
 
-        // A track keeps the album (and so the id) it was first given; new ones get the catalog match if there is one.
-        // Songs with a real album are the canonical copy, so they go first (stable: relevance order is otherwise kept).
+        // A track keeps the album (and so the id) it was first given; new ones get the catalog match, or the user's fixed album.
+        // Songs matched to a standard release are the canonical copy, so they go first (stable: relevance order is otherwise kept).
+        var cfg2 = Plugin.Instance?.Configuration;
+        var canonical = new HashSet<string>();
         var finals = ranked.Select(r =>
         {
             if (_registry.TryGetBySource(r.Source, r.SourceId, out var known))
@@ -63,10 +70,15 @@ public class SearchService
                 return known;
             }
 
-            return _library.WithId(meta.TryGetValue(r.Key, out var m)
-                ? r with { Meta = m, ThumbnailUrl = m.ArtworkUrl ?? r.ThumbnailUrl }
-                : r);
-        }).OrderBy(r => r.Meta is { } m && !MetadataMatcher.IsSpecialEditionName(m.Album) ? 0 : 1).ToList();
+            meta.TryGetValue(r.Key, out var catalog);
+            if (catalog is not null && !MetadataMatcher.IsSpecialEditionName(catalog.Album))
+            {
+                canonical.Add(r.Key);
+            }
+
+            var chosen = AlbumPolicy.Apply(cfg2?.AlbumMode, cfg2?.FixedAlbumName, cfg2?.FixedAlbumArtist, r, catalog);
+            return _library.WithId(chosen is null ? r : r with { Meta = chosen, ThumbnailUrl = catalog?.ArtworkUrl ?? r.ThumbnailUrl });
+        }).OrderBy(r => canonical.Contains(r.Key) ? 0 : 1).ToList();
         _registry.Add(finals);
         return finals;
     }

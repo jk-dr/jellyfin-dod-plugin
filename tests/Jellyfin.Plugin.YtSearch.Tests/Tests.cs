@@ -489,3 +489,48 @@ public class CatalogMatchTests
     public void FolderNamesAreSafe(string input, string expected) =>
         Assert.Equal(expected, Jellyfin.Plugin.YtSearch.Services.InputGuard.SafeFolderName(input).Replace(" <3", " 3").Replace("  ", " "));
 }
+
+public class AlbumPolicyTests
+{
+    private static Jellyfin.Plugin.YtSearch.Services.TrackResult T() => new("youtube", "aaaaaaaaaaa", "Some Song (Official)", "Some Channel", 200, "", "");
+    private static readonly Jellyfin.Plugin.YtSearch.Services.TrackMeta Catalog = new("Some Song", "Real Artist", "Real Album", "Real Artist", 2020, 3, 1, "Pop", "https://is1-ssl.mzstatic.com/a.jpg");
+
+    [Fact]
+    public void AutoKeepsTheCatalogMatchOrNothing()
+    {
+        Assert.Same(Catalog, Jellyfin.Plugin.YtSearch.Services.AlbumPolicy.Apply("auto", "X", "Y", T(), Catalog));
+        Assert.Null(Jellyfin.Plugin.YtSearch.Services.AlbumPolicy.Apply("auto", "X", "Y", T(), null));
+        Assert.Null(Jellyfin.Plugin.YtSearch.Services.AlbumPolicy.Apply(null, "X", "Y", T(), null));
+    }
+
+    [Fact]
+    public void FixedPutsEverythingInTheNamedAlbumKeepingTitleAndArtist()
+    {
+        var m = Jellyfin.Plugin.YtSearch.Services.AlbumPolicy.Apply("fixed", "My Downloads", "Various Artists", T(), Catalog)!;
+        Assert.Equal("My Downloads", m.Album);
+        Assert.Equal("Various Artists", m.AlbumArtist);
+        Assert.Equal("Some Song", m.Title);
+        Assert.Equal("Real Artist", m.Artist);
+        Assert.Null(m.TrackNumber);
+        var loose = Jellyfin.Plugin.YtSearch.Services.AlbumPolicy.Apply("fixed", "My Downloads", "Various Artists", T(), null)!;
+        Assert.Equal("My Downloads", loose.Album);
+        Assert.Equal("Some Channel", loose.Artist);
+    }
+
+    [Fact]
+    public void FixedWithBlankNamesFallsBackToDefaults()
+    {
+        var m = Jellyfin.Plugin.YtSearch.Services.AlbumPolicy.Apply("fixed", "  ", null, T(), null)!;
+        Assert.Equal("YouTube & SoundCloud", m.Album);
+        Assert.Equal("Various Artists", m.AlbumArtist);
+    }
+
+    [Fact]
+    public void PlaceUsesTheChosenAlbumAndSanitizesIt()
+    {
+        var m = Jellyfin.Plugin.YtSearch.Services.AlbumPolicy.Place(T(), "Chosen\u0007 Album", "Chosen Artist");
+        Assert.Equal("Chosen Album", m.Album);
+        Assert.Equal("Chosen Artist", m.AlbumArtist);
+        Assert.Equal("Some Song (Official)", m.Title);
+    }
+}

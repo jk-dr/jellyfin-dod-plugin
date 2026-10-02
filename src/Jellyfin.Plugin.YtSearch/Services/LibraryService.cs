@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
@@ -57,6 +58,12 @@ public class LibraryService
 
         var root = Root.TrimEnd('/');
         var name = (r.Source == Sources.SoundCloud ? "sc-" : "yt-") + r.SourceId + ".m4a";
+        if (r.FolderOverride is { Length: > 0 } folder)
+        {
+            // An album folder the user picked (checked when it was chosen: an existing Jellyfin album).
+            return Path.Combine(folder.TrimEnd('/'), name);
+        }
+
         var path = r.Meta is { } m
             ? Path.Combine(root, InputGuard.SafeFolderName(m.AlbumArtist, 80), InputGuard.SafeFolderName(m.Album, 100), name)
             : Path.Combine(root, name);
@@ -117,7 +124,7 @@ public class LibraryService
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         File.Move(taggedFile, path, true);
 
-        await IndexAsync(ct).ConfigureAwait(false);
+        await IndexAsync(Path.GetDirectoryName(path)!, ct).ConfigureAwait(false);
 
         // A scan that was already running (first track, or a library scan in progress) may still be working: wait for the item.
         var id = _library.GetNewItemId(path, typeof(Audio));
@@ -130,7 +137,7 @@ public class LibraryService
                 await Task.Delay(500, ct).ConfigureAwait(false);
                 if (attempt is 6 or 20)
                 {
-                    await IndexAsync(ct).ConfigureAwait(false); // ask again, now that the library folder exists
+                    await IndexAsync(Path.GetDirectoryName(path)!, ct).ConfigureAwait(false); // ask again, now that the library folder exists
                 }
             }
         }
@@ -171,23 +178,34 @@ public class LibraryService
         }
     }
 
-    /// <summary>Asks Jellyfin to look at the library folder now (only this folder, not every library).</summary>
-    public async Task IndexAsync(CancellationToken ct)
+    /// <summary>
+    /// Asks Jellyfin to look at <paramref name="folder"/> now: the nearest folder Jellyfin already knows (the album, the artist,
+    /// or the library root), so only a small part of the library is scanned.
+    /// </summary>
+    public async Task IndexAsync(string folder, CancellationToken ct)
     {
         await _scanLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            Directory.CreateDirectory(Root);
-            if (_library.FindByPath(Root.TrimEnd('/'), true) is Folder folder)
+            for (var dir = folder.TrimEnd('/'); dir.Length > 1; dir = Path.GetDirectoryName(dir) ?? string.Empty)
             {
-                var options = new MetadataRefreshOptions(new DirectoryService(_fileSystem));
-                await folder.ValidateChildren(new Progress<double>(), options, true, false, ct).ConfigureAwait(false);
-                return;
+                if (_library.FindByPath(dir, true) is Folder known)
+                {
+                    var options = new MetadataRefreshOptions(new DirectoryService(_fileSystem));
+                    await known.ValidateChildren(new Progress<double>(), options, true, false, ct).ConfigureAwait(false);
+                    return;
+                }
             }
 
-            // First time: create the library (a global scan once, the library is otherwise empty).
-            var normalized = Root.TrimEnd('/');
-            if (!_library.GetVirtualFolders().Any(f => f.Locations.Any(l => string.Equals(l.TrimEnd('/'), normalized, StringComparison.Ordinal))))
+            // Nothing known yet: only our own library can be created from scratch (a global scan once, it is otherwise empty).
+            var root = Root.TrimEnd('/');
+            if (!folder.TrimEnd('/').StartsWith(root, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException("That folder is not inside a Jellyfin library");
+            }
+
+            Directory.CreateDirectory(root);
+            if (!_library.GetVirtualFolders().Any(f => f.Locations.Any(l => string.Equals(l.TrimEnd('/'), root, StringComparison.Ordinal))))
             {
                 _logger.LogInformation("Creating Jellyfin music library '{Name}' at {Root}", LibraryName, Root);
                 await _library.AddVirtualFolder(LibraryName, CollectionTypeOptions.music, NewLibraryOptions(Root), false).ConfigureAwait(false);
@@ -199,6 +217,26 @@ public class LibraryService
         {
             _scanLock.Release();
         }
+    }
+
+    /// <summary>Every album Jellyfin knows, for the "put it in this album" picker.</summary>
+    public IReadOnlyList<(Guid Id, string Name, string Artist)> ListAlbums() =>
+        _library.GetItemList(new InternalItemsQuery { IncludeItemTypes = new[] { Jellyfin.Data.Enums.BaseItemKind.MusicAlbum }, Recursive = true })
+            .OfType<MusicAlbum>()
+            .Select(a => (a.Id, a.Name, a.AlbumArtists.FirstOrDefault() ?? string.Empty))
+            .OrderBy(a => a.Name, StringComparer.CurrentCultureIgnoreCase)
+            .Take(3000)
+            .ToList();
+
+    /// <summary>The folder of an existing album, if it is a real, writable directory.</summary>
+    public (string Name, string Artist, string Folder)? ResolveAlbumFolder(Guid albumId)
+    {
+        if (_library.GetItemById(albumId) is not MusicAlbum album || string.IsNullOrEmpty(album.Path) || !Directory.Exists(album.Path))
+        {
+            return null;
+        }
+
+        return (album.Name, album.AlbumArtists.FirstOrDefault() ?? string.Empty, album.Path.TrimEnd('/'));
     }
 
     /// <summary>Removes empty album/artist folders left behind after deletions and lets Jellyfin drop their items.</summary>
@@ -222,7 +260,7 @@ public class LibraryService
 
         if (removed)
         {
-            await IndexAsync(ct).ConfigureAwait(false);
+            await IndexAsync(root, ct).ConfigureAwait(false);
         }
     }
 

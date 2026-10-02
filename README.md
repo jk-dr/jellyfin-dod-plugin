@@ -20,6 +20,10 @@ Appends YouTube and SoundCloud results to Jellyfin's standard search API (`/Item
 - **yt-dlp:** the plugin downloads its own nightly binary (checksum-verified) and updates it every 12 hours.
 - **Cookies:** upload a Netscape `cookies.txt` on the plugin settings page (age-restricted / bot-check videos);
   the Refresh button checks that they still work. Cookies are only sent to YouTube.
+- **Choosing the album:** by default a song goes into its real album (or stays loose). In the settings you can
+  instead send every download into one album you name. On the "Find and add" box you can pick, per song, an album
+  you already have (the file is saved into that album's folder, so Jellyfin needs write access there) or a new name.
+  Songs placed into an album you picked are never auto-deleted.
 - **Find and add:** the settings page can search and add a song directly, for apps that only search a synced copy
   of the library (e.g. Manet) and so never ask the server.
 - **Recent download problems:** the settings page lists why downloads failed; clients only show a generic error.
