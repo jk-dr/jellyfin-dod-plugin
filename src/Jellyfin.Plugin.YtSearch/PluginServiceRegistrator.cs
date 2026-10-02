@@ -5,6 +5,7 @@ using MediaBrowser.Controller.Plugins;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 
 namespace Jellyfin.Plugin.YtSearch;
 
@@ -14,6 +15,7 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
     {
         serviceCollection.AddSingleton<YtDlpService>();
         serviceCollection.AddSingleton<SearchService>();
+        serviceCollection.AddHostedService<YtDlpUpdater>();
         serviceCollection.AddTransient<IStartupFilter, YtStartupFilter>();
     }
 

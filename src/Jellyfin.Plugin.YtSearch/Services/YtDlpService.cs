@@ -89,6 +89,33 @@ public class YtDlpService
     private static string? Str(JsonElement e, string name) =>
         e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
 
+    /// <summary>Runs yt-dlp's built-in updater on the configured channel (nightly by default).</summary>
+    public async Task UpdateAsync(CancellationToken ct)
+    {
+        var bin = await EnsureBinaryAsync(ct).ConfigureAwait(false);
+        var channel = Plugin.Instance?.Configuration.UpdateChannel is { Length: > 0 } c ? c : "nightly";
+        var psi = new ProcessStartInfo(bin)
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        psi.ArgumentList.Add("--update-to");
+        psi.ArgumentList.Add($"{channel}@latest");
+
+        using var proc = Process.Start(psi) ?? throw new InvalidOperationException("Could not start yt-dlp");
+        var err = proc.StandardError.ReadToEndAsync(ct);
+        var output = await proc.StandardOutput.ReadToEndAsync(ct).ConfigureAwait(false);
+        await proc.WaitForExitAsync(ct).ConfigureAwait(false);
+        if (proc.ExitCode != 0)
+        {
+            _logger.LogWarning("yt-dlp update failed ({Code}): {Err}", proc.ExitCode, await err.ConfigureAwait(false));
+            return;
+        }
+
+        _logger.LogInformation("yt-dlp update ({Channel}): {Output}", channel, output.Trim().ReplaceLineEndings(" | "));
+    }
+
     private async Task<string> EnsureBinaryAsync(CancellationToken ct)
     {
         var configured = Plugin.Instance?.Configuration.YtDlpPath;
@@ -116,7 +143,7 @@ public class YtDlpService
             _logger.LogInformation("Downloading {Asset} to {Target}", asset, target);
             using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(2) };
             var tmp = target + ".tmp";
-            await using (var src = await http.GetStreamAsync($"https://github.com/yt-dlp/yt-dlp/releases/latest/download/{asset}", ct).ConfigureAwait(false))
+            await using (var src = await http.GetStreamAsync($"https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/latest/download/{asset}", ct).ConfigureAwait(false))
             await using (var dst = File.Create(tmp))
             {
                 await src.CopyToAsync(dst, ct).ConfigureAwait(false);
