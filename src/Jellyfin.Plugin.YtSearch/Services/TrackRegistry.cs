@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using System.Threading.Tasks;
 using MediaBrowser.Common.Configuration;
 using Microsoft.Extensions.Logging;
 
@@ -27,7 +28,7 @@ public class TrackRegistry
     private readonly ConcurrentDictionary<Guid, bool> _playable = new();
     private readonly object _saveLock = new();
     private bool _loaded;
-    private DateTime _lastSave = DateTime.MinValue;
+    private bool _saveScheduled;
 
     public TrackRegistry(IApplicationPaths paths, LibraryService library, ILogger<TrackRegistry> logger)
     {
@@ -116,18 +117,33 @@ public class TrackRegistry
         }
     }
 
+    /// <summary>Saves a few seconds from now; changes arriving in the meantime ride along in that one save.</summary>
     private void SaveSoon()
     {
         lock (_saveLock)
         {
-            if (DateTime.UtcNow - _lastSave < TimeSpan.FromSeconds(10))
+            if (_saveScheduled)
             {
                 return;
             }
 
-            _lastSave = DateTime.UtcNow;
+            _saveScheduled = true;
         }
 
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(TimeSpan.FromSeconds(3)).ConfigureAwait(false);
+            lock (_saveLock)
+            {
+                _saveScheduled = false;
+            }
+
+            Save();
+        });
+    }
+
+    private void Save()
+    {
         try
         {
             var cutoff = DateTime.UtcNow - MaxAge;

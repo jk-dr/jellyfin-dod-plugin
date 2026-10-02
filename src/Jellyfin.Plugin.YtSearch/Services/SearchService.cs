@@ -124,12 +124,15 @@ public class SearchService
         using var cts = new CancellationTokenSource(timeout);
         var raw = await _ytdlp.SearchAsync(source, query, max, cts.Token).ConfigureAwait(false);
         var results = raw.Select(_library.WithId).ToList();
+        var shown = results;
         if (source == Sources.SoundCloud && (Plugin.Instance?.Configuration.HideUnplayableSoundCloud ?? true))
         {
-            results = await FilterPlayableAsync(results).ConfigureAwait(false);
+            shown = await FilterPlayableAsync(results).ConfigureAwait(false);
         }
 
+        // Hidden tracks are registered too, so their "can't download" verdict is remembered across restarts.
         _registry.Add(results);
+        results = shown;
 
         _logger.LogInformation("{Source} search '{Query}' -> {Count} results", source, query, results.Count);
         return results;
