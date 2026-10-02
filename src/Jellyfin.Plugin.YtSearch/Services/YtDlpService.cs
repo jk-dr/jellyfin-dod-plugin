@@ -9,21 +9,32 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using MediaBrowser.Common.Configuration;
+using MediaBrowser.Controller.MediaEncoding;
 using Microsoft.Extensions.Logging;
 
 namespace Jellyfin.Plugin.YtSearch.Services;
+
+public class DownloadException : Exception
+{
+    public DownloadException(string message)
+        : base(message)
+    {
+    }
+}
 
 public class YtDlpService
 {
     private readonly IApplicationPaths _paths;
     private readonly CookieService _cookies;
+    private readonly IMediaEncoder _encoder;
     private readonly ILogger<YtDlpService> _logger;
     private readonly SemaphoreSlim _installLock = new(1, 1);
 
-    public YtDlpService(IApplicationPaths paths, CookieService cookies, ILogger<YtDlpService> logger)
+    public YtDlpService(IApplicationPaths paths, CookieService cookies, IMediaEncoder encoder, ILogger<YtDlpService> logger)
     {
         _paths = paths;
         _cookies = cookies;
+        _encoder = encoder;
         _logger = logger;
     }
 
@@ -131,6 +142,99 @@ public class YtDlpService
 
     private static string? Str(JsonElement e, string name) =>
         e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+
+    /// <summary>
+    /// Downloads the m4a audio of a track into <paramref name="directory"/> and returns the file path.
+    /// Only m4a is accepted (no conversion) so the file is playable and downloadable on iOS.
+    /// </summary>
+    public async Task<string> DownloadAsync(TrackResult track, string directory, CancellationToken ct)
+    {
+        var bin = await EnsureBinaryAsync(ct).ConfigureAwait(false);
+        Directory.CreateDirectory(directory);
+        var psi = new ProcessStartInfo(bin)
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        foreach (var a in new[] { "-f", "bestaudio[ext=m4a]", "--no-playlist", "--no-warnings", "--no-progress", "-o", Path.Combine(directory, "audio.%(ext)s") })
+        {
+            psi.ArgumentList.Add(a);
+        }
+
+        if (!string.IsNullOrEmpty(_encoder.EncoderPath))
+        {
+            psi.ArgumentList.Add("--ffmpeg-location");
+            psi.ArgumentList.Add(_encoder.EncoderPath);
+        }
+
+        if (track.Source == Sources.YouTube)
+        {
+            AddCookies(psi);
+        }
+
+        psi.ArgumentList.Add(track.PageUrl);
+
+        using var proc = Process.Start(psi) ?? throw new InvalidOperationException("Could not start yt-dlp");
+        var stdout = proc.StandardOutput.ReadToEndAsync(ct);
+        var stderr = proc.StandardError.ReadToEndAsync(ct);
+        try
+        {
+            await proc.WaitForExitAsync(ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            try { proc.Kill(true); } catch (InvalidOperationException) { }
+            throw;
+        }
+
+        await stdout.ConfigureAwait(false);
+        var err = await stderr.ConfigureAwait(false);
+        var file = Path.Combine(directory, "audio.m4a");
+        if (proc.ExitCode != 0 || !File.Exists(file))
+        {
+            throw new DownloadException(ClassifyDownloadError(err));
+        }
+
+        return file;
+    }
+
+    internal static string ClassifyDownloadError(string stderr)
+    {
+        var l = stderr.ToLowerInvariant();
+        if (l.Contains("drm"))
+        {
+            return "This track is DRM-protected and can't be downloaded.";
+        }
+
+        if (l.Contains("confirm your age") || l.Contains("age-restricted") || l.Contains("age restricted"))
+        {
+            return "This video is age-restricted. Upload YouTube cookies in the plugin settings.";
+        }
+
+        if (l.Contains("not a bot") || l.Contains("sign in to confirm"))
+        {
+            return "YouTube is asking to confirm you're not a bot. Upload fresh YouTube cookies in the plugin settings.";
+        }
+
+        if (l.Contains("country") || l.Contains("geo") || l.Contains("not available in your"))
+        {
+            return "This track is blocked in your region.";
+        }
+
+        if (l.Contains("private video") || l.Contains("video unavailable") || l.Contains("has been removed") || l.Contains("been terminated") || l.Contains("does not exist") || l.Contains("404"))
+        {
+            return "This track is unavailable (deleted or private).";
+        }
+
+        if (l.Contains("requested format is not available"))
+        {
+            return "No m4a audio stream is available for this track.";
+        }
+
+        var last = stderr.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).LastOrDefault() ?? "unknown error";
+        return "Download failed: " + (last.Length > 300 ? last[..300] : last);
+    }
 
     /// <summary>Adds --cookies when a cookie file is available. Use for every yt-dlp call that talks to YouTube.</summary>
     public void AddCookies(ProcessStartInfo psi)

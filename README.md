@@ -1,13 +1,31 @@
-# Jellyfin YouTube Search plugin (personal use)
+# Jellyfin YouTube + SoundCloud search plugin (personal use)
 
-Appends YouTube results to Jellyfin's standard search API as Audio items,
-downloaded with yt-dlp on first play. Target: Jellyfin 10.11.11 (.NET 9).
+Appends YouTube and SoundCloud results to Jellyfin's standard search API (`/Items?searchTerm=`,
+`/Search/Hints`), so any Jellyfin client shows them as normal songs. Target: Jellyfin 10.11.11 (.NET 9).
 
-## Phase 0 server setup (headless Linux)
+## How it works
 
-1. `sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp && sudo chmod a+rx /usr/local/bin/yt-dlp`
-   (also install `ffmpeg`; Jellyfin already ships jellyfin-ffmpeg)
-2. `sudo mkdir -p /var/lib/jellyfin/youtube && sudo chown jellyfin: /var/lib/jellyfin/youtube`
-3. In Jellyfin: add a Music library pointing at that folder.
-4. Build: `dotnet publish src/Jellyfin.Plugin.YtSearch -c Release`, copy the DLL to
-   `<jellyfin-data>/plugins/YtSearch_0.1.0.0/` and restart Jellyfin.
+- **Search:** `yt-dlp ytsearchN:` and `scsearchN:` run in parallel with Jellyfin's own search; results are
+  appended to the JSON and cached for a few minutes. Result ids are the ids Jellyfin would give the file.
+- **First use:** when a client plays, downloads, favorites or adds a result to a playlist, the plugin downloads
+  the m4a (no conversion), adds it to an auto-created "YouTube & SoundCloud" music library and then lets
+  the original request through, so streaming, ranges, transcoding and favorites are Jellyfin's own.
+- **Cleanup:** after each new download (and daily at 04:00) tracks played at most 3 times, not a favorite of any
+  user, in no playlist and untouched for 7 days are deleted. Their ids keep working (they download again on demand).
+- **yt-dlp:** the plugin downloads its own nightly binary into the data folder and updates it every 12 hours.
+- **Cookies:** upload a Netscape `cookies.txt` on the plugin settings page (age-restricted / bot-check videos);
+  the Refresh button checks that they still work. Cookies are only sent to YouTube.
+
+## Install (Docker)
+
+1. `dotnet publish src/Jellyfin.Plugin.YtSearch -c Release`
+2. Copy `bin/Release/net9.0/publish/Jellyfin.Plugin.YtSearch.dll` to `/config/plugins/YtSearch_0.1.0.0/` and restart the container.
+3. Dashboard > Plugins > My Plugins > YouTube Search > Settings.
+
+No yt-dlp install or extra volume is needed (data lives under `/config/data/ytsearch`).
+
+## Notes
+
+- Files must be m4a: YouTube/SoundCloud tracks without an m4a stream (or with DRM) return a 404 with the reason.
+- YouTube may block server IPs ("confirm you're not a bot"); upload cookies if that happens.
+- Long SoundCloud mixes take 30-60 s to download on first play.

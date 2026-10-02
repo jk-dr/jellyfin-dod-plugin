@@ -110,3 +110,19 @@ public class CookieTests
     public void ClassifiesFailures(string stderr, string state) =>
         Assert.Equal(state, Jellyfin.Plugin.YtSearch.Services.YtDlpService.ClassifyFailure(stderr).State);
 }
+
+public class CleanupPolicyTests
+{
+    private static readonly System.DateTime Now = new(2026, 10, 10, 0, 0, 0, System.DateTimeKind.Utc);
+
+    private static bool Delete(int plays = 0, bool fav = false, bool playlist = false, int ageDays = 8) =>
+        Jellyfin.Plugin.YtSearch.Services.CleanupPolicy.ShouldDelete(plays, fav, playlist, Now.AddDays(-ageDays), Now, 3, 7);
+
+    [Fact] public void DeletesUnusedOldTrack() => Assert.True(Delete());
+    [Fact] public void DeletesAtExactlyThreePlays() => Assert.True(Delete(plays: 3));
+    [Fact] public void KeepsAfterFourPlays() => Assert.False(Delete(plays: 4));
+    [Fact] public void KeepsFavorite() => Assert.False(Delete(fav: true));
+    [Fact] public void KeepsPlaylistTrack() => Assert.False(Delete(playlist: true));
+    [Fact] public void KeepsTrackYoungerThanAWeek() => Assert.False(Delete(ageDays: 6));
+    [Fact] public void DeletesAtExactlyAWeek() => Assert.True(Delete(ageDays: 7));
+}

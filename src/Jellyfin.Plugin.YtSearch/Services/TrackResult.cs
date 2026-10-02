@@ -15,7 +15,14 @@ public sealed record TrackResult(string Source, string SourceId, string Title, s
 {
     public long RunTimeTicks => (long)(DurationSeconds * TimeSpan.TicksPerSecond);
 
-    public Guid TrackId => StableGuid($"{Source}-track:{SourceId}");
+    private readonly Guid? _trackId;
+
+    /// <summary>The id Jellyfin gives the item once it exists, set by <see cref="LibraryService"/>. Falls back to a stable hash.</summary>
+    public Guid TrackId
+    {
+        get => _trackId ?? StableGuid($"{Source}-track:{SourceId}");
+        init => _trackId = value;
+    }
 
     public Guid AlbumId => StableGuid($"{Source}-album:{SourceId}");
 

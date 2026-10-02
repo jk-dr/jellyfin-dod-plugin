@@ -15,6 +15,10 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
     {
         serviceCollection.AddSingleton<CookieService>();
         serviceCollection.AddSingleton<YtDlpService>();
+        serviceCollection.AddSingleton<LibraryService>();
+        serviceCollection.AddSingleton<TrackRegistry>();
+        serviceCollection.AddSingleton<CleanupService>();
+        serviceCollection.AddSingleton<DownloadService>();
         serviceCollection.AddSingleton<SearchService>();
         serviceCollection.AddHostedService<YtDlpUpdater>();
         serviceCollection.AddTransient<IStartupFilter, YtStartupFilter>();

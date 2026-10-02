@@ -11,20 +11,21 @@ namespace Jellyfin.Plugin.YtSearch.Services;
 /// <summary>Cached multi-source search plus an id registry so virtual ids can be resolved later.</summary>
 public class SearchService
 {
-    private const int MaxRegistry = 5000;
-
     private readonly YtDlpService _ytdlp;
+    private readonly LibraryService _library;
+    private readonly TrackRegistry _registry;
     private readonly ILogger<SearchService> _logger;
     private readonly ConcurrentDictionary<string, (DateTime Expires, Task<IReadOnlyList<TrackResult>> Task)> _cache = new();
-    private readonly ConcurrentDictionary<Guid, TrackResult> _registry = new();
 
-    public SearchService(YtDlpService ytdlp, ILogger<SearchService> logger)
+    public SearchService(YtDlpService ytdlp, LibraryService library, TrackRegistry registry, ILogger<SearchService> logger)
     {
         _ytdlp = ytdlp;
+        _library = library;
+        _registry = registry;
         _logger = logger;
     }
 
-    public bool TryResolve(Guid id, out TrackResult result) => _registry.TryGetValue(id, out result!);
+    public bool TryResolve(Guid id, out TrackResult result) => _registry.TryGet(id, out result);
 
     /// <summary>Searches every enabled source in parallel. YouTube results come first, then SoundCloud.</summary>
     public async Task<IReadOnlyList<TrackResult>> SearchAsync(string query, CancellationToken ct)
@@ -79,17 +80,9 @@ public class SearchService
     {
         var timeout = TimeSpan.FromSeconds(Math.Max(Plugin.Instance?.Configuration.SearchTimeoutSeconds ?? 8, 1));
         using var cts = new CancellationTokenSource(timeout);
-        var results = await _ytdlp.SearchAsync(source, query, max, cts.Token).ConfigureAwait(false);
-        if (_registry.Count > MaxRegistry)
-        {
-            _registry.Clear();
-        }
-
-        foreach (var r in results)
-        {
-            _registry[r.TrackId] = r;
-            _registry[r.AlbumId] = r;
-        }
+        var raw = await _ytdlp.SearchAsync(source, query, max, cts.Token).ConfigureAwait(false);
+        var results = raw.Select(_library.WithId).ToList();
+        _registry.Add(results);
 
         _logger.LogInformation("{Source} search '{Query}' -> {Count} results", source, query, results.Count);
         return results;

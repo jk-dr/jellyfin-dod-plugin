@@ -66,6 +66,23 @@
                         <label class="inputLabel inputLabelUnfocused" for="ytCacheMinutes">Search cache (minutes)</label>
                         <input id="ytCacheMinutes" type="number" is="emby-input" min="0" max="120" />
                     </div>
+                    <div class="checkboxContainer checkboxContainer-withDescription">
+                        <label>
+                            <input id="clEnabled" type="checkbox" is="emby-checkbox" />
+                            <span>Auto-delete old tracks</span>
+                        </label>
+                        <div class="fieldDescription checkboxFieldDescription">
+                            After a new track is downloaded (and daily), deletes downloaded tracks that were played few times and are not a favorite of any user or in any playlist.
+                        </div>
+                    </div>
+                    <div class="inputContainer">
+                        <label class="inputLabel inputLabelUnfocused" for="clMaxPlays">Delete tracks played at most this many times</label>
+                        <input id="clMaxPlays" type="number" is="emby-input" min="0" max="1000" />
+                    </div>
+                    <div class="inputContainer">
+                        <label class="inputLabel inputLabelUnfocused" for="clDays">...and untouched (not downloaded or played) for this many days</label>
+                        <input id="clDays" type="number" is="emby-input" min="0" max="3650" />
+                    </div>
                     <div class="inputContainer">
                         <label class="inputLabel inputLabelUnfocused" for="ytChannel">yt-dlp update channel</label>
                         <select id="ytChannel" is="emby-select">
@@ -154,6 +171,9 @@
                 api('GET', 'Cookies').then(render);
                 ApiClient.getPluginConfiguration(pluginId).then(function (c) {
                     $('ytMaxResults').value = c.MaxResults;
+                    $('clEnabled').checked = c.EnableCleanup !== false;
+                    $('clMaxPlays').value = c.CleanupMaxPlays;
+                    $('clDays').value = c.CleanupRetentionDays;
                     $('scMaxResults').value = c.SoundCloudMaxResults;
                     $('scEnabled').checked = c.EnableSoundCloud !== false;
                     $('ytCacheMinutes').value = c.SearchCacheMinutes;
@@ -205,6 +225,9 @@
                 busy(true);
                 ApiClient.getPluginConfiguration(pluginId).then(function (c) {
                     c.MaxResults = Math.max(0, parseInt($('ytMaxResults').value, 10) || 0);
+                    c.EnableCleanup = $('clEnabled').checked;
+                    c.CleanupMaxPlays = Math.max(0, parseInt($('clMaxPlays').value, 10) || 0);
+                    c.CleanupRetentionDays = Math.max(0, parseInt($('clDays').value, 10) || 0);
                     c.SoundCloudMaxResults = Math.max(0, parseInt($('scMaxResults').value, 10) || 0);
                     c.EnableSoundCloud = $('scEnabled').checked;
                     c.SearchCacheMinutes = parseInt($('ytCacheMinutes').value, 10) || 0;

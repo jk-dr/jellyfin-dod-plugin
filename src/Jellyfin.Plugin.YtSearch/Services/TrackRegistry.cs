@@ -1,0 +1,132 @@
+using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Text.Json;
+using MediaBrowser.Common.Configuration;
+using Microsoft.Extensions.Logging;
+
+namespace Jellyfin.Plugin.YtSearch.Services;
+
+/// <summary>
+/// Remembers every search result by id so clients can still play, download or queue it later,
+/// including after a server restart. Persisted to disk, pruned by age and size.
+/// </summary>
+public class TrackRegistry
+{
+    private const int MaxEntries = 20000;
+    private static readonly TimeSpan MaxAge = TimeSpan.FromDays(60);
+
+    private sealed record Stored(string Source, string SourceId, string Title, string Artist, double Duration, string Thumb, string PageUrl, DateTime LastSeen);
+
+    private readonly string _file;
+    private readonly ILogger<TrackRegistry> _logger;
+    private readonly LibraryService _library;
+    private readonly ConcurrentDictionary<Guid, (TrackResult Track, DateTime LastSeen)> _byId = new();
+    private readonly object _saveLock = new();
+    private bool _loaded;
+    private DateTime _lastSave = DateTime.MinValue;
+
+    public TrackRegistry(IApplicationPaths paths, LibraryService library, ILogger<TrackRegistry> logger)
+    {
+        _file = Path.Combine(paths.DataPath, "ytsearch", "registry.json");
+        _library = library;
+        _logger = logger;
+    }
+
+    public bool TryGet(Guid id, out TrackResult track)
+    {
+        EnsureLoaded();
+        if (_byId.TryGetValue(id, out var e))
+        {
+            track = e.Track;
+            return true;
+        }
+
+        track = null!;
+        return false;
+    }
+
+    public void Add(IEnumerable<TrackResult> tracks)
+    {
+        EnsureLoaded();
+        var now = DateTime.UtcNow;
+        foreach (var t in tracks)
+        {
+            _byId[t.TrackId] = (t, now);
+            _byId[t.AlbumId] = (t, now);
+        }
+
+        SaveSoon();
+    }
+
+    private void EnsureLoaded()
+    {
+        if (_loaded)
+        {
+            return;
+        }
+
+        lock (_saveLock)
+        {
+            if (_loaded)
+            {
+                return;
+            }
+
+            try
+            {
+                if (File.Exists(_file))
+                {
+                    var items = JsonSerializer.Deserialize<List<Stored>>(File.ReadAllText(_file)) ?? new();
+                    foreach (var s in items)
+                    {
+                        var t = _library.WithId(new TrackResult(s.Source, s.SourceId, s.Title, s.Artist, s.Duration, s.Thumb, s.PageUrl));
+                        _byId[t.TrackId] = (t, s.LastSeen);
+                        _byId[t.AlbumId] = (t, s.LastSeen);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Could not read track registry; starting empty");
+            }
+
+            _loaded = true;
+        }
+    }
+
+    private void SaveSoon()
+    {
+        lock (_saveLock)
+        {
+            if (DateTime.UtcNow - _lastSave < TimeSpan.FromSeconds(10))
+            {
+                return;
+            }
+
+            _lastSave = DateTime.UtcNow;
+        }
+
+        try
+        {
+            var cutoff = DateTime.UtcNow - MaxAge;
+            var rows = _byId.Values
+                .Where(v => v.LastSeen >= cutoff)
+                .GroupBy(v => v.Track.TrackId)
+                .Select(g => g.First())
+                .OrderByDescending(v => v.LastSeen)
+                .Take(MaxEntries)
+                .Select(v => new Stored(v.Track.Source, v.Track.SourceId, v.Track.Title, v.Track.Artist, v.Track.DurationSeconds, v.Track.ThumbnailUrl, v.Track.PageUrl, v.LastSeen))
+                .ToList();
+            Directory.CreateDirectory(Path.GetDirectoryName(_file)!);
+            File.WriteAllText(_file + ".tmp", JsonSerializer.Serialize(rows));
+            File.Move(_file + ".tmp", _file, true);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not save track registry");
+        }
+    }
+}
