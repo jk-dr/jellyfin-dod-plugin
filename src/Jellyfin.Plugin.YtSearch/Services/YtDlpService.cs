@@ -29,7 +29,7 @@ public class YtDlpService
 
     public string DataDirectory => Path.Combine(_paths.DataPath, "ytsearch");
 
-    public async Task<IReadOnlyList<YtResult>> SearchAsync(string query, int max, CancellationToken ct)
+    public async Task<IReadOnlyList<TrackResult>> SearchAsync(string source, string query, int max, CancellationToken ct)
     {
         var bin = await EnsureBinaryAsync(ct).ConfigureAwait(false);
         var psi = new ProcessStartInfo(bin)
@@ -38,11 +38,15 @@ public class YtDlpService
             RedirectStandardError = true,
             UseShellExecute = false,
         };
-        psi.ArgumentList.Add($"ytsearch{max}:{query}");
+        psi.ArgumentList.Add($"{(source == Sources.SoundCloud ? "scsearch" : "ytsearch")}{max}:{query}");
         psi.ArgumentList.Add("--flat-playlist");
         psi.ArgumentList.Add("-J");
         psi.ArgumentList.Add("--no-warnings");
-        AddCookies(psi);
+        if (source == Sources.YouTube)
+        {
+            // Never send YouTube cookies to other sites.
+            AddCookies(psi);
+        }
 
         using var proc = Process.Start(psi) ?? throw new InvalidOperationException("Could not start yt-dlp");
         var stderrTask = proc.StandardError.ReadToEndAsync(ct);
@@ -55,7 +59,7 @@ public class YtDlpService
                 throw new InvalidOperationException($"yt-dlp exited {proc.ExitCode}: {await stderrTask.ConfigureAwait(false)}");
             }
 
-            return ParseSearchJson(stdout);
+            return ParseSearchJson(stdout, source);
         }
         catch (OperationCanceledException)
         {
@@ -64,9 +68,9 @@ public class YtDlpService
         }
     }
 
-    public static IReadOnlyList<YtResult> ParseSearchJson(string json)
+    public static IReadOnlyList<TrackResult> ParseSearchJson(string json, string source = Sources.YouTube)
     {
-        var results = new List<YtResult>();
+        var results = new List<TrackResult>();
         using var doc = JsonDocument.Parse(json);
         if (!doc.RootElement.TryGetProperty("entries", out var entries))
         {
@@ -76,18 +80,53 @@ public class YtDlpService
         foreach (var e in entries.EnumerateArray())
         {
             var id = Str(e, "id");
-            // 11-char ids are videos; skips channels/playlists. No duration = live/upcoming.
-            if (id is not { Length: 11 } || !e.TryGetProperty("duration", out var d) || d.ValueKind != JsonValueKind.Number)
+            // No duration = live/upcoming/not a track.
+            if (string.IsNullOrEmpty(id) || !e.TryGetProperty("duration", out var d) || d.ValueKind != JsonValueKind.Number)
             {
                 continue;
             }
 
             var title = Str(e, "title") ?? id;
-            var channel = Str(e, "channel") ?? Str(e, "uploader") ?? "YouTube";
-            results.Add(new YtResult(id, title, channel, d.GetDouble(), $"https://i.ytimg.com/vi/{id}/hqdefault.jpg"));
+            if (source == Sources.SoundCloud)
+            {
+                var page = Str(e, "webpage_url") ?? Str(e, "url");
+                if (page is null)
+                {
+                    continue;
+                }
+
+                results.Add(new TrackResult(source, id, title, Str(e, "uploader") ?? Str(e, "channel") ?? "SoundCloud", d.GetDouble(), BestThumbnail(e), page));
+            }
+            else
+            {
+                // 11-char ids are videos; skips channels/playlists.
+                if (id.Length != 11)
+                {
+                    continue;
+                }
+
+                var channel = Str(e, "channel") ?? Str(e, "uploader") ?? "YouTube";
+                results.Add(new TrackResult(source, id, title, channel, d.GetDouble(), $"https://i.ytimg.com/vi/{id}/hqdefault.jpg", $"https://www.youtube.com/watch?v={id}"));
+            }
         }
 
         return results;
+    }
+
+    private static string BestThumbnail(JsonElement e)
+    {
+        if (e.TryGetProperty("thumbnails", out var t) && t.ValueKind == JsonValueKind.Array)
+        {
+            for (var i = t.GetArrayLength() - 1; i >= 0; i--)
+            {
+                if (Str(t[i], "url") is { Length: > 0 } url)
+                {
+                    return url;
+                }
+            }
+        }
+
+        return string.Empty;
     }
 
     private static string? Str(JsonElement e, string name) =>

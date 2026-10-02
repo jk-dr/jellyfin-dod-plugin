@@ -22,9 +22,36 @@ public class Tests
     public void ParsesOnlyVideos()
     {
         var r = YtDlpService.ParseSearchJson(SearchJson);
-        Assert.Equal(new[] { "dQw4w9WgXcQ", "abcdefghijk" }, r.Select(x => x.VideoId));
-        Assert.Equal("Up", r[1].Channel);
+        Assert.Equal(new[] { "dQw4w9WgXcQ", "abcdefghijk" }, r.Select(x => x.SourceId));
+        Assert.Equal("Up", r[1].Artist);
         Assert.Equal(213 * 10_000_000L, r[0].RunTimeTicks);
+    }
+
+    private const string ScJson = """
+    {"entries":[
+      {"id":"253508261","title":"Never Gonna Give You Up","uploader":"Rick Astley","duration":213.619,"webpage_url":"https://soundcloud.com/rick-astley-official/never-gonna-give-you-up","thumbnails":[{"url":"https://i1.sndcdn.com/a-original.jpg"}]},
+      {"id":"2","title":"No art","uploader":"U","duration":10,"webpage_url":"https://soundcloud.com/u/no-art"},
+      {"id":"3","title":"No page","uploader":"U","duration":10}
+    ]}
+    """;
+
+    [Fact]
+    public void ParsesSoundCloud()
+    {
+        var r = YtDlpService.ParseSearchJson(ScJson, Sources.SoundCloud);
+        Assert.Equal(2, r.Count);
+        Assert.Equal("Rick Astley", r[0].Artist);
+        Assert.Equal("https://i1.sndcdn.com/a-original.jpg", r[0].ThumbnailUrl);
+        Assert.Equal("", r[1].ThumbnailUrl);
+        Assert.Equal("sc253508261", r[0].ImageTag);
+    }
+
+    [Fact]
+    public void SourcesGetDifferentIdsForSameSourceId()
+    {
+        var a = new TrackResult(Sources.YouTube, "x", "t", "a", 1, "", "");
+        var b = new TrackResult(Sources.SoundCloud, "x", "t", "a", 1, "", "");
+        Assert.NotEqual(a.TrackId, b.TrackId);
     }
 
     [Fact]

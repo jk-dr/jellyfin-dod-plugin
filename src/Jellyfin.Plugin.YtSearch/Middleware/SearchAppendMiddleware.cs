@@ -47,7 +47,7 @@ public class SearchAppendMiddleware
         var path = req.Path.Value ?? string.Empty;
 
         var img = ImagePath.Match(path);
-        if (img.Success && Guid.TryParse(img.Groups[2].Value, out var imgId) && _search.TryResolve(imgId, out var imgResult))
+        if (img.Success && Guid.TryParse(img.Groups[2].Value, out var imgId) && _search.TryResolve(imgId, out var imgResult) && imgResult.ThumbnailUrl.Length > 0)
         {
             ctx.Response.Redirect(imgResult.ThumbnailUrl);
             return;
@@ -112,7 +112,7 @@ public class SearchAppendMiddleware
         return types.Count == 0 || types.Contains("Audio", StringComparer.OrdinalIgnoreCase);
     }
 
-    internal static byte[]? Append(byte[] body, IReadOnlyList<YtResult> results, bool hints, string term, string serverId)
+    internal static byte[]? Append(byte[] body, IReadOnlyList<TrackResult> results, bool hints, string term, string serverId)
     {
         if (results.Count == 0 || JsonNode.Parse(body) is not JsonObject root)
         {
@@ -137,7 +137,7 @@ public class SearchAppendMiddleware
 
     private static string N(Guid g) => g.ToString("N");
 
-    private static JsonObject Item(YtResult r, string serverId) => new()
+    private static JsonObject Item(TrackResult r, string serverId) => new()
     {
         ["Name"] = r.Title,
         ["ServerId"] = serverId,
@@ -149,33 +149,33 @@ public class SearchAppendMiddleware
         ["IsFolder"] = false,
         ["Type"] = "Audio",
         ["MediaType"] = "Audio",
-        ["Artists"] = new JsonArray(r.Channel),
-        ["ArtistItems"] = new JsonArray(new JsonObject { ["Name"] = r.Channel, ["Id"] = N(r.ArtistId) }),
+        ["Artists"] = new JsonArray(r.Artist),
+        ["ArtistItems"] = new JsonArray(new JsonObject { ["Name"] = r.Artist, ["Id"] = N(r.ArtistId) }),
         ["Album"] = r.Title,
         ["AlbumId"] = N(r.AlbumId),
-        ["AlbumArtist"] = r.Channel,
-        ["AlbumArtists"] = new JsonArray(new JsonObject { ["Name"] = r.Channel, ["Id"] = N(r.ArtistId) }),
-        ["ImageTags"] = new JsonObject { ["Primary"] = "yt" + r.VideoId },
+        ["AlbumArtist"] = r.Artist,
+        ["AlbumArtists"] = new JsonArray(new JsonObject { ["Name"] = r.Artist, ["Id"] = N(r.ArtistId) }),
+        ["ImageTags"] = new JsonObject { ["Primary"] = r.ImageTag },
         ["BackdropImageTags"] = new JsonArray(),
-        ["AlbumPrimaryImageTag"] = "yt" + r.VideoId,
+        ["AlbumPrimaryImageTag"] = r.ImageTag,
         ["LocationType"] = "FileSystem",
         ["UserData"] = new JsonObject { ["PlaybackPositionTicks"] = 0, ["PlayCount"] = 0, ["IsFavorite"] = false, ["Played"] = false, ["Key"] = N(r.TrackId) },
     };
 
-    private static JsonObject Hint(YtResult r, string term) => new()
+    private static JsonObject Hint(TrackResult r, string term) => new()
     {
         ["ItemId"] = N(r.TrackId),
         ["Id"] = N(r.TrackId),
         ["Name"] = r.Title,
         ["MatchedTerm"] = term,
-        ["PrimaryImageTag"] = "yt" + r.VideoId,
+        ["PrimaryImageTag"] = r.ImageTag,
         ["Type"] = "Audio",
         ["IsFolder"] = false,
         ["RunTimeTicks"] = r.RunTimeTicks,
         ["MediaType"] = "Audio",
         ["Album"] = r.Title,
         ["AlbumId"] = N(r.AlbumId),
-        ["AlbumArtist"] = r.Channel,
-        ["Artists"] = new JsonArray(r.Channel),
+        ["AlbumArtist"] = r.Artist,
+        ["Artists"] = new JsonArray(r.Artist),
     };
 }

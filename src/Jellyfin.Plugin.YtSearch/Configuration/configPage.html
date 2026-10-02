@@ -50,7 +50,17 @@
                     <h3>Settings</h3>
                     <div class="inputContainer">
                         <label class="inputLabel inputLabelUnfocused" for="ytMaxResults">Max YouTube results per search</label>
-                        <input id="ytMaxResults" type="number" is="emby-input" min="1" max="50" />
+                        <input id="ytMaxResults" type="number" is="emby-input" min="0" max="50" />
+                    </div>
+                    <div class="inputContainer">
+                        <label class="inputLabel inputLabelUnfocused" for="scMaxResults">Max SoundCloud results per search</label>
+                        <input id="scMaxResults" type="number" is="emby-input" min="0" max="50" />
+                    </div>
+                    <div class="checkboxContainer checkboxContainer-withDescription">
+                        <label>
+                            <input id="scEnabled" type="checkbox" is="emby-checkbox" />
+                            <span>Include SoundCloud results</span>
+                        </label>
                     </div>
                     <div class="inputContainer">
                         <label class="inputLabel inputLabelUnfocused" for="ytCacheMinutes">Search cache (minutes)</label>
@@ -144,6 +154,8 @@
                 api('GET', 'Cookies').then(render);
                 ApiClient.getPluginConfiguration(pluginId).then(function (c) {
                     $('ytMaxResults').value = c.MaxResults;
+                    $('scMaxResults').value = c.SoundCloudMaxResults;
+                    $('scEnabled').checked = c.EnableSoundCloud !== false;
                     $('ytCacheMinutes').value = c.SearchCacheMinutes;
                     $('ytChannel').value = c.UpdateChannel || 'nightly';
                     $('ytCookiesPath').value = c.CookiesPath || '';
@@ -192,7 +204,9 @@
                 e.preventDefault();
                 busy(true);
                 ApiClient.getPluginConfiguration(pluginId).then(function (c) {
-                    c.MaxResults = parseInt($('ytMaxResults').value, 10) || 10;
+                    c.MaxResults = Math.max(0, parseInt($('ytMaxResults').value, 10) || 0);
+                    c.SoundCloudMaxResults = Math.max(0, parseInt($('scMaxResults').value, 10) || 0);
+                    c.EnableSoundCloud = $('scEnabled').checked;
                     c.SearchCacheMinutes = parseInt($('ytCacheMinutes').value, 10) || 0;
                     c.UpdateChannel = $('ytChannel').value;
                     c.CookiesPath = $('ytCookiesPath').value.trim();

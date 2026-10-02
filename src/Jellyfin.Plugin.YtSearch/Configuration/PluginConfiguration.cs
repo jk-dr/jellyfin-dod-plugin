@@ -15,7 +15,12 @@ public class PluginConfiguration : BasePluginConfiguration
 
     public int UpdateIntervalHours { get; set; } = 12;
 
+    /// <summary>Max YouTube results per search.</summary>
     public int MaxResults { get; set; } = 10;
+
+    public bool EnableSoundCloud { get; set; } = true;
+
+    public int SoundCloudMaxResults { get; set; } = 10;
 
     public int SearchCacheMinutes { get; set; } = 5;
 
