@@ -5,16 +5,24 @@ Appends YouTube and SoundCloud results to Jellyfin's standard search API (`/Item
 
 ## How it works
 
-- **Search:** `yt-dlp ytsearchN:` and `scsearchN:` run in parallel with Jellyfin's own search; results are
-  appended to the JSON and cached for a few minutes. Result ids are the ids Jellyfin would give the file.
-- **First use:** when a client plays, downloads, favorites or adds a result to a playlist, the plugin downloads
-  the m4a (no conversion), adds it to an auto-created "YouTube & SoundCloud" music library and then lets
-  the original request through, so streaming, ranges, transcoding and favorites are Jellyfin's own.
+- **Search:** YouTube and SoundCloud are queried directly over HTTP (about 0.5 s; yt-dlp is the automatic fallback),
+  merged and ranked by relevance to what you typed, and appended to the JSON of `/Items?searchTerm=` and
+  `/Search/Hints`. Result ids are the ids Jellyfin will give the files, so they never change.
+- **Real albums:** each result is matched against Apple's iTunes Search (no key) for its real album, track number,
+  year and cover. Only confident matches get an album (no remixes, covers or live versions); the rest are loose tracks.
+- **First use:** when a client plays, downloads, favorites or adds a result to a playlist, the plugin downloads the
+  m4a, writes the tags and cover into it with ffmpeg stream copy (no re-encoding), files it as
+  `Artist/Album/yt-ID.m4a` (or loose in the root), and has Jellyfin's own scanner index it. Albums, artists, artwork
+  and "recently added" then work like any other music.
 - **Cleanup:** after each new download (and daily at 04:00) tracks played at most 3 times, not a favorite of any
-  user, in no playlist and untouched for 7 days are deleted. Their ids keep working (they download again on demand).
-- **yt-dlp:** the plugin downloads its own nightly binary into the data folder and updates it every 12 hours.
+  user, in no playlist and untouched for 7 days are deleted, with their empty album/artist folders. Their ids keep
+  working (they download again on demand).
+- **yt-dlp:** the plugin downloads its own nightly binary (checksum-verified) and updates it every 12 hours.
 - **Cookies:** upload a Netscape `cookies.txt` on the plugin settings page (age-restricted / bot-check videos);
   the Refresh button checks that they still work. Cookies are only sent to YouTube.
+- **Find and add:** the settings page can search and add a song directly, for apps that only search a synced copy
+  of the library (e.g. Manet) and so never ask the server.
+- **Recent download problems:** the settings page lists why downloads failed; clients only show a generic error.
 
 ## Install (Docker)
 

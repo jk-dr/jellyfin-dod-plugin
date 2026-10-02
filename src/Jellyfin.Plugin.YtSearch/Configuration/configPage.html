@@ -11,6 +11,26 @@
             <h2>YouTube Search</h2>
 
             <div class="verticalSection">
+                <h3>Find and add music</h3>
+                <div class="fieldDescription">
+                    Apps that only search the songs they have synced (some do) can't see online results. Add a song here and it appears in your library, and in those apps after their next sync.
+                </div>
+                <div class="inputContainer" style="margin-top:.8em;">
+                    <input id="faQuery" type="search" is="emby-input" placeholder="Song or artist" />
+                </div>
+                <button is="emby-button" type="button" id="faSearch" class="raised"><span>Search</span></button>
+                <div id="faStatus" class="fieldDescription"></div>
+                <div id="faResults"></div>
+            </div>
+
+            <div class="verticalSection">
+                <h3>Recent download problems</h3>
+                <div class="fieldDescription">Apps only show a generic "playback error" when a download fails. The real reason is here.</div>
+                <div id="failList" class="fieldDescription">Loading&hellip;</div>
+                <button is="emby-button" type="button" id="failRefresh" class="raised"><span>Refresh</span></button>
+            </div>
+
+            <div class="verticalSection">
                 <h3>YouTube cookies</h3>
 
                 <div class="ytWarn">
@@ -120,6 +140,12 @@
     <style>
         .ytWarn { border-left: 4px solid #e0a800; background: rgba(224,168,0,.12); padding: .8em 1em; margin: .5em 0 1em; border-radius: 4px; }
         .ytStatus { display: inline-block; padding: .35em .8em; border-radius: 1em; font-weight: 600; }
+        .faRow { display: flex; align-items: center; gap: .8em; padding: .5em 0; border-bottom: 1px solid rgba(128,128,128,.25); }
+        .faRow img { width: 48px; height: 48px; object-fit: cover; border-radius: 4px; background: rgba(128,128,128,.3); }
+        .faRow .faText { flex: 1; min-width: 0; }
+        .faRow .faTitle { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .faRow .faSub { opacity: .75; font-size: .9em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .failRow { padding: .4em 0; border-bottom: 1px solid rgba(128,128,128,.25); }
         .ytNone { background: rgba(128,128,128,.25); }
         .ytWorking { background: rgba(40,167,69,.25); }
         .ytFailing, .ytError { background: rgba(220,53,69,.28); }
@@ -258,7 +284,63 @@
                 return false;
             });
 
-            page.addEventListener('pageshow', load);
+            function el(tag, text, cls) { var e = document.createElement(tag); if (text !== undefined) { e.textContent = text; } if (cls) { e.className = cls; } return e; }
+
+            function loadFailures() {
+                api('GET', 'Failures').then(function (list) {
+                    var box = $('failList');
+                    box.textContent = '';
+                    if (!list.length) { box.textContent = 'No failed downloads since the server started.'; return; }
+                    list.forEach(function (f) {
+                        var row = el('div', undefined, 'failRow');
+                        row.appendChild(el('strong', f.title));
+                        row.appendChild(el('div', f.reason));
+                        row.appendChild(el('div', f.source + ' \u00B7 ' + fmt(f.time), 'fieldDescription'));
+                        box.appendChild(row);
+                    });
+                });
+            }
+            $('failRefresh').addEventListener('click', loadFailures);
+
+            function runSearch() {
+                var q = $('faQuery').value.trim();
+                if (q.length < 3) { $('faStatus').textContent = 'Type at least 3 characters.'; return; }
+                $('faStatus').textContent = 'Searching...';
+                $('faResults').textContent = '';
+                api('GET', 'Search?q=' + encodeURIComponent(q)).then(function (rows) {
+                    $('faStatus').textContent = rows.length ? '' : 'No results.';
+                    rows.forEach(function (r) {
+                        var row = el('div', undefined, 'faRow');
+                        var img = document.createElement('img');
+                        img.loading = 'lazy';
+                        img.src = ApiClient.getUrl('Items/' + r.id + '/Images/Primary', { api_key: ApiClient.accessToken(), maxWidth: 96 });
+                        row.appendChild(img);
+                        var text = el('div', undefined, 'faText');
+                        text.appendChild(el('div', r.title, 'faTitle'));
+                        text.appendChild(el('div', r.artist + (r.album ? ' \u00B7 ' + r.album : '') + ' \u00B7 ' + Math.floor(r.seconds / 60) + ':' + ('0' + (r.seconds % 60)).slice(-2) + ' \u00B7 ' + r.source, 'faSub'));
+                        row.appendChild(text);
+                        var status = el('span', '', 'faSub');
+                        var btn = el('button', 'Add');
+                        btn.setAttribute('is', 'emby-button');
+                        btn.className = 'raised';
+                        btn.type = 'button';
+                        btn.addEventListener('click', function () {
+                            btn.disabled = true; status.textContent = 'Downloading...';
+                            api('POST', 'Add?id=' + r.id).then(function (res) {
+                                status.textContent = res.message;
+                                if (!res.ok) { btn.disabled = false; loadFailures(); }
+                            }).catch(function () { status.textContent = 'Failed. See the Jellyfin log.'; btn.disabled = false; });
+                        });
+                        row.appendChild(status);
+                        row.appendChild(btn);
+                        $('faResults').appendChild(row);
+                    });
+                }).catch(function () { $('faStatus').textContent = 'Search failed.'; });
+            }
+            $('faSearch').addEventListener('click', runSearch);
+            $('faQuery').addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); runSearch(); } });
+
+            page.addEventListener('pageshow', function () { load(); loadFailures(); });
         })();
     </script>
 </div>

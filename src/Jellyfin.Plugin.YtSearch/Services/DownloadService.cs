@@ -18,16 +18,18 @@ public class DownloadService
     private readonly LibraryService _library;
     private readonly CleanupService _cleanup;
     private readonly AudioTagger _tagger;
+    private readonly FailureLog _failures;
     private readonly IApplicationPaths _paths;
     private readonly ILogger<DownloadService> _logger;
     private readonly ConcurrentDictionary<Guid, Task> _inFlight = new();
 
-    public DownloadService(YtDlpService ytdlp, LibraryService library, CleanupService cleanup, AudioTagger tagger, IApplicationPaths paths, ILogger<DownloadService> logger)
+    public DownloadService(YtDlpService ytdlp, LibraryService library, CleanupService cleanup, AudioTagger tagger, FailureLog failures, IApplicationPaths paths, ILogger<DownloadService> logger)
     {
         _ytdlp = ytdlp;
         _library = library;
         _cleanup = cleanup;
         _tagger = tagger;
+        _failures = failures;
         _paths = paths;
         _logger = logger;
     }
@@ -88,11 +90,13 @@ public class DownloadService
         }
         catch (OperationCanceledException)
         {
+            _failures.Add(track, "The download timed out.");
             throw new DownloadException("The download timed out.");
         }
         catch (DownloadException ex)
         {
             _logger.LogWarning("Download of {Source} {Id} failed: {Message}", track.Source, track.SourceId, ex.Message);
+            _failures.Add(track, ex.Message);
             throw;
         }
         finally
