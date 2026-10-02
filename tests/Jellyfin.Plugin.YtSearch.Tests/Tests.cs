@@ -225,3 +225,56 @@ public class SecurityTests
     public void CleanupOnlyTouchesOurFiles(string? path, bool ours) =>
         Assert.Equal(ours, Jellyfin.Plugin.YtSearch.Services.LibraryService.IsOurFile("/lib", path));
 }
+
+public class RankingTests
+{
+    private static Jellyfin.Plugin.YtSearch.Services.TrackResult T(string src, string id, string title, string artist, double dur = 200) =>
+        new(src, id, title, artist, dur, "", "");
+
+    [Fact]
+    public void ExactSongBeatsRemixesAndMixesAcrossSources()
+    {
+        var yt = Jellyfin.Plugin.YtSearch.Services.Sources.YouTube;
+        var sc = Jellyfin.Plugin.YtSearch.Services.Sources.SoundCloud;
+        var input = new[]
+        {
+            T(yt, "11111111111", "Rick Astley Never Gonna Give You Up Slowed + Reverb", "Chill Edits"),
+            T(yt, "22222222222", "Never Gonna Give You Up (Karaoke Version)", "Sing King"),
+            T(yt, "33333333333", "Rick Astley - Never Gonna Give You Up (Official Video)", "Rick Astley", 213),
+            T(sc, "1", "Never Gonna Give You Up", "Rick Astley", 213),
+            T(sc, "2", "Never Gonna Give You Up - Rick Astley (Dubstep Remix)", "DJ X"),
+            T(yt, "44444444444", "Best of 80s - 2 hour mix", "Retro", 7300),
+        };
+        var ranked = Jellyfin.Plugin.YtSearch.Services.RelevanceRanker.Rank("rick astley never gonna give you up", input);
+        var ids = ranked.Select(r => r.SourceId).ToList();
+        // the two clean versions (one per source) lead, interleaved by accuracy not by source
+        Assert.Equal(new[] { "33333333333", "1" }, ids.Take(2).OrderBy(x => x == "1" ? 1 : 0).ToArray());
+        Assert.True(ids.IndexOf("4" + "4444444444") > ids.IndexOf("1"));
+        Assert.True(ids.IndexOf("33333333333") < ids.IndexOf("22222222222"));
+        Assert.True(ids.IndexOf("1") < ids.IndexOf("2"));
+    }
+
+    [Fact]
+    public void SourcesAreInterleavedNotGrouped()
+    {
+        var yt = Jellyfin.Plugin.YtSearch.Services.Sources.YouTube;
+        var sc = Jellyfin.Plugin.YtSearch.Services.Sources.SoundCloud;
+        var input = new[]
+        {
+            T(yt, "aaaaaaaaaaa", "Daft Punk - Get Lucky live at festival remix", "Fan"),
+            T(yt, "bbbbbbbbbbb", "Daft Punk - Get Lucky", "Daft Punk"),
+            T(sc, "10", "Get Lucky", "Daft Punk"),
+            T(sc, "11", "Get Lucky cover", "Someone"),
+        };
+        var ids = Jellyfin.Plugin.YtSearch.Services.RelevanceRanker.Rank("daft punk get lucky", input).Select(r => r.SourceId).ToList();
+        Assert.Equal(new[] { "bbbbbbbbbbb", "10" }, ids.Take(2).OrderBy(x => x == "10" ? 1 : 0).ToArray());
+    }
+
+    [Fact]
+    public void AccentsAndPunctuationDontMatter() =>
+        Assert.Equal(new[] { "beyonce", "halo" }, Jellyfin.Plugin.YtSearch.Services.RelevanceRanker.Tokens("Beyoncé - Halo!"));
+
+    [Fact]
+    public void KeepsOrderWhenNothingToCompare() =>
+        Assert.Single(Jellyfin.Plugin.YtSearch.Services.RelevanceRanker.Rank("x", new[] { T("youtube", "aaaaaaaaaaa", "t", "a") }));
+}

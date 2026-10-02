@@ -27,7 +27,7 @@ public class SearchService
 
     public bool TryResolve(Guid id, out TrackResult result) => _registry.TryGet(id, out result);
 
-    /// <summary>Searches every enabled source in parallel. YouTube results come first, then SoundCloud.</summary>
+    /// <summary>Searches every enabled source in parallel and returns the results ordered by relevance to the query.</summary>
     public async Task<IReadOnlyList<TrackResult>> SearchAsync(string query, CancellationToken ct)
     {
         query = InputGuard.CleanQuery(query);
@@ -47,7 +47,7 @@ public class SearchService
         }
 
         var all = await Task.WhenAll(tasks).ConfigureAwait(false);
-        return all.SelectMany(r => r).ToList();
+        return RelevanceRanker.Rank(query, all.SelectMany(r => r).ToList());
     }
 
     /// <summary>One source; a failure is logged and yields no results so the other sources still show.</summary>

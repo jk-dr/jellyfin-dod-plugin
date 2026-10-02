@@ -63,6 +63,26 @@ public class SearchAppendMiddleware
         var req = ctx.Request;
         var path = req.Path.Value ?? string.Empty;
 
+        if (Plugin.Instance?.Configuration.LogAllApiRequests == true && !path.Contains("/Images/", StringComparison.OrdinalIgnoreCase))
+        {
+            _logger.LogInformation("API {Method} {Path} client='{Client}'", req.Method, path, ClientName(req));
+        }
+
+        // Search requests are always logged (term and types only; the raw query string can hold tokens),
+        // including ones this plugin ignores, so it is visible what an app really sends.
+        if (Plugin.Instance?.Configuration.LogSearchRequests == true && req.Query.ContainsKey("searchTerm")
+            && (ItemsPath.IsMatch(path) || HintsPath.IsMatch(path)))
+        {
+            _logger.LogInformation(
+                "Search seen: {Method} {Path} term='{Term}' types='{Types}' parentId='{Parent}' client='{Client}'",
+                req.Method,
+                path,
+                InputGuard.CleanQuery(req.Query["searchTerm"].ToString()),
+                req.Query["includeItemTypes"].ToString(),
+                req.Query["parentId"].ToString(),
+                ClientName(req));
+        }
+
         // Fast exit for the vast majority of requests.
         if (!path.Contains("Items", StringComparison.OrdinalIgnoreCase)
             && !path.Contains("Audio", StringComparison.OrdinalIgnoreCase)
@@ -208,12 +228,6 @@ public class SearchAppendMiddleware
     private async Task AppendSearchAsync(HttpContext ctx, string path, string term, bool isHints)
     {
         var req = ctx.Request;
-        if (Plugin.Instance?.Configuration.LogSearchRequests == true)
-        {
-            // Log the term only: the raw query string can contain api_key / token values.
-            _logger.LogInformation("Search request {Path} term='{Term}' types='{Types}'", path, term, req.Query["includeItemTypes"].ToString());
-        }
-
         // Start the searches now so they run in parallel with Jellyfin's own search.
         var ytTask = _search.SearchAsync(term, ctx.RequestAborted);
 
@@ -242,6 +256,8 @@ public class SearchAppendMiddleware
                 {
                     bytes = edited;
                 }
+
+                _logger.LogInformation("Search '{Term}': appended {Count} of {Found} online results", term, edited is null ? 0 : yt.Count, yt.Count);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -251,6 +267,12 @@ public class SearchAppendMiddleware
 
         ctx.Response.ContentLength = bytes.Length;
         await original.WriteAsync(bytes, ctx.RequestAborted);
+    }
+
+    private static string ClientName(HttpRequest req)
+    {
+        var ua = req.Headers.UserAgent.ToString();
+        return ua.Length > 60 ? ua[..60] : ua;
     }
 
     /// <summary>Our middleware runs before Jellyfin's own auth, so it must check the caller itself before doing any work.</summary>

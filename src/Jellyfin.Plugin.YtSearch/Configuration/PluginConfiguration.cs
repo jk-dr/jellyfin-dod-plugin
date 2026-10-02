@@ -46,4 +46,7 @@ public class PluginConfiguration : BasePluginConfiguration
     public int SearchTimeoutSeconds { get; set; } = 8;
 
     public bool LogSearchRequests { get; set; } = true;
+
+    /// <summary>Debug: log method, path (no query string) and client of every API request, to see what an app calls.</summary>
+    public bool LogAllApiRequests { get; set; }
 }

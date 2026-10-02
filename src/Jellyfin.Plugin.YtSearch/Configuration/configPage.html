@@ -102,6 +102,13 @@
                         <input id="ytCookiesPath" type="text" is="emby-input" />
                         <div class="fieldDescription">Used only when no cookies were uploaded above.</div>
                     </div>
+                    <div class="checkboxContainer checkboxContainer-withDescription">
+                        <label>
+                            <input id="dbgAll" type="checkbox" is="emby-checkbox" />
+                            <span>Debug: log every API request (path only)</span>
+                        </label>
+                        <div class="fieldDescription checkboxFieldDescription">Turn on to see which endpoints an app calls when you search. Turn off afterwards.</div>
+                    </div>
                     <button is="emby-button" type="submit" class="raised button-submit block">
                         <span>Save</span>
                     </button>
@@ -178,6 +185,7 @@
                 ApiClient.getPluginConfiguration(pluginId).then(function (c) {
                     $('ytMaxResults').value = c.MaxResults;
                     $('clEnabled').checked = c.EnableCleanup !== false;
+                    $('dbgAll').checked = c.LogAllApiRequests === true;
                     $('scHideDrm').checked = c.HideUnplayableSoundCloud !== false;
                     $('clMaxPlays').value = c.CleanupMaxPlays;
                     $('clDays').value = c.CleanupRetentionDays;
@@ -233,6 +241,7 @@
                 ApiClient.getPluginConfiguration(pluginId).then(function (c) {
                     c.MaxResults = Math.max(0, parseInt($('ytMaxResults').value, 10) || 0);
                     c.EnableCleanup = $('clEnabled').checked;
+                    c.LogAllApiRequests = $('dbgAll').checked;
                     c.HideUnplayableSoundCloud = $('scHideDrm').checked;
                     c.CleanupMaxPlays = Math.max(0, parseInt($('clMaxPlays').value, 10) || 0);
                     c.CleanupRetentionDays = Math.max(0, parseInt($('clDays').value, 10) || 0);
