@@ -58,3 +58,28 @@ public class Tests
         Assert.Equal(2, (int)o["TotalRecordCount"]!);
     }
 }
+
+public class CookieTests
+{
+    private const string Sample =
+        "# Netscape HTTP Cookie File\r\n" +
+        ".youtube.com\tTRUE\t/\tTRUE\t4102444800\t__Secure-3PSID\tabc\r\n" +
+        "#HttpOnly_.youtube.com\tTRUE\t/\tTRUE\t1\tSID\txyz\r\n" +
+        ".example.com\tTRUE\t/\tFALSE\t0\tfoo\tbar\r\n" +
+        "garbage line\r\n";
+
+    [Fact]
+    public void ParsesNetscapeIncludingHttpOnly()
+    {
+        var c = Jellyfin.Plugin.YtSearch.Services.CookieService.Parse(Jellyfin.Plugin.YtSearch.Services.CookieService.Normalize(Sample));
+        Assert.Equal(3, c.Count);
+        Assert.Contains(c, x => x.Name == "SID" && x.Domain == "youtube.com" && x.Expiry == 1);
+    }
+
+    [Theory]
+    [InlineData("ERROR: The provided YouTube account cookies are no longer valid. They have likely been rotated", "failing")]
+    [InlineData("ERROR: Sign in to confirm you're not a bot", "failing")]
+    [InlineData("ERROR: Unable to download webpage: timed out", "error")]
+    public void ClassifiesFailures(string stderr, string state) =>
+        Assert.Equal(state, Jellyfin.Plugin.YtSearch.Services.YtDlpService.ClassifyFailure(stderr).State);
+}

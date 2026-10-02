@@ -13,6 +13,7 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
 {
     public void RegisterServices(IServiceCollection serviceCollection, IServerApplicationHost applicationHost)
     {
+        serviceCollection.AddSingleton<CookieService>();
         serviceCollection.AddSingleton<YtDlpService>();
         serviceCollection.AddSingleton<SearchService>();
         serviceCollection.AddHostedService<YtDlpUpdater>();

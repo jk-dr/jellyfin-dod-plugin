@@ -7,6 +7,9 @@ public class PluginConfiguration : BasePluginConfiguration
     /// <summary>Path to a yt-dlp binary. Empty = plugin downloads and manages its own copy.</summary>
     public string YtDlpPath { get; set; } = string.Empty;
 
+    /// <summary>Optional fallback: path to a Netscape cookies.txt mounted into the container. An uploaded file takes priority.</summary>
+    public string CookiesPath { get; set; } = string.Empty;
+
     /// <summary>yt-dlp release channel: nightly, master or stable.</summary>
     public string UpdateChannel { get; set; } = "nightly";
 

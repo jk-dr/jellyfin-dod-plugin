@@ -1,1 +1,212 @@
-<html><body>placeholder</body></html>
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>YouTube Search</title>
+</head>
+<body>
+<div id="YtSearchPage" data-role="page" class="page type-interior pluginConfigurationPage" data-require="emby-input,emby-button,emby-select">
+    <div data-role="content">
+        <div class="content-primary">
+            <h2>YouTube Search</h2>
+
+            <div class="verticalSection">
+                <h3>YouTube cookies</h3>
+
+                <div class="ytWarn">
+                    <strong>&#9888; Warning:</strong> cookies give this server access to your Google account's YouTube session.
+                    They are only needed for age-restricted videos and "Sign in to confirm you're not a bot" blocks.
+                    Prefer a throwaway account, as YouTube can flag accounts used for downloading.
+                    Export from a <em>private/incognito window</em> and close it straight after, or YouTube will rotate the cookies and they stop working.
+                </div>
+
+                <div id="ytStatus" class="ytStatus ytNone">Loading&hellip;</div>
+                <div id="ytDetail" class="fieldDescription"></div>
+
+                <div style="margin:1em 0;">
+                    <button is="emby-button" type="button" id="ytRefresh" class="raised">
+                        <span>Refresh (check cookies now)</span>
+                    </button>
+                    <button is="emby-button" type="button" id="ytRemove" class="raised">
+                        <span>Remove cookies</span>
+                    </button>
+                </div>
+
+                <div class="inputContainer">
+                    <label class="inputLabel inputLabelUnfocused" for="ytCookieText">Paste cookies.txt (Netscape format), or choose a file below</label>
+                    <textarea id="ytCookieText" rows="6" style="width:100%;font-family:monospace;" spellcheck="false" placeholder="# Netscape HTTP Cookie File"></textarea>
+                </div>
+                <div class="inputContainer">
+                    <input type="file" id="ytCookieFile" accept=".txt,text/plain" />
+                </div>
+                <button is="emby-button" type="button" id="ytUpload" class="raised button-submit">
+                    <span>Upload cookies</span>
+                </button>
+                <div id="ytUploadMsg" class="fieldDescription"></div>
+            </div>
+
+            <form class="ytForm">
+                <div class="verticalSection">
+                    <h3>Settings</h3>
+                    <div class="inputContainer">
+                        <label class="inputLabel inputLabelUnfocused" for="ytMaxResults">Max YouTube results per search</label>
+                        <input id="ytMaxResults" type="number" is="emby-input" min="1" max="50" />
+                    </div>
+                    <div class="inputContainer">
+                        <label class="inputLabel inputLabelUnfocused" for="ytCacheMinutes">Search cache (minutes)</label>
+                        <input id="ytCacheMinutes" type="number" is="emby-input" min="0" max="120" />
+                    </div>
+                    <div class="inputContainer">
+                        <label class="inputLabel inputLabelUnfocused" for="ytChannel">yt-dlp update channel</label>
+                        <select id="ytChannel" is="emby-select">
+                            <option value="nightly">nightly</option>
+                            <option value="master">master</option>
+                            <option value="stable">stable</option>
+                        </select>
+                    </div>
+                    <div class="inputContainer">
+                        <label class="inputLabel inputLabelUnfocused" for="ytCookiesPath">Cookies file path (optional fallback, e.g. /config/cookies.txt)</label>
+                        <input id="ytCookiesPath" type="text" is="emby-input" />
+                        <div class="fieldDescription">Used only when no cookies were uploaded above.</div>
+                    </div>
+                    <button is="emby-button" type="submit" class="raised button-submit block">
+                        <span>Save</span>
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <style>
+        .ytWarn { border-left: 4px solid #e0a800; background: rgba(224,168,0,.12); padding: .8em 1em; margin: .5em 0 1em; border-radius: 4px; }
+        .ytStatus { display: inline-block; padding: .35em .8em; border-radius: 1em; font-weight: 600; }
+        .ytNone { background: rgba(128,128,128,.25); }
+        .ytWorking { background: rgba(40,167,69,.25); }
+        .ytFailing, .ytError { background: rgba(220,53,69,.28); }
+        .ytUnchecked { background: rgba(224,168,0,.25); }
+    </style>
+
+    <script type="text/javascript">
+        (function () {
+            var pluginId = '6f1c6a52-3b0e-4f4e-9d0a-5a8f2b7c1e43';
+            var page = document.querySelector('#YtSearchPage');
+            var $ = function (id) { return page.querySelector('#' + id); };
+
+            function api(type, path, body) {
+                return ApiClient.ajax({
+                    type: type,
+                    url: ApiClient.getUrl('YtSearch/' + path),
+                    data: body ? JSON.stringify(body) : undefined,
+                    contentType: 'application/json',
+                    dataType: 'json'
+                });
+            }
+
+            function fmt(d) { return d ? new Date(d).toLocaleString() : ''; }
+
+            function render(s) {
+                var el = $('ytStatus'), detail = [];
+                var lc = s.lastCheck;
+                if (!s.present) {
+                    el.className = 'ytStatus ytNone';
+                    el.textContent = 'No cookies';
+                } else if (lc && lc.state === 'working') {
+                    el.className = 'ytStatus ytWorking';
+                    el.textContent = '✔ Working';
+                } else if (lc && (lc.state === 'failing' || lc.state === 'error')) {
+                    el.className = 'ytStatus ytFailing';
+                    el.textContent = '✖ Not working';
+                } else {
+                    el.className = 'ytStatus ytUnchecked';
+                    el.textContent = '⚠ Not checked yet';
+                }
+                if (s.present) {
+                    detail.push(s.cookieCount + ' cookies from ' + (s.source === 'uploaded' ? 'uploaded file' : 'configured path') +
+                        (s.uploadedAt ? ' (uploaded ' + fmt(s.uploadedAt) + ')' : '') + '.');
+                    if (!s.loginCookiesFound) {
+                        detail.push('⚠ No sign-in cookies (SID / __Secure-3PSID) found. You are probably not logged in when exporting.');
+                    } else if (s.loginCookiesExpired) {
+                        detail.push('⚠ Sign-in cookies expired on ' + fmt(s.loginCookiesExpire) + '.');
+                    } else if (s.loginCookiesExpire) {
+                        detail.push('Sign-in cookies expire ' + fmt(s.loginCookiesExpire) + ' (YouTube may rotate them sooner).');
+                    }
+                }
+                if (lc && lc.message) {
+                    detail.push(lc.message + (lc.checkedAt ? ' (checked ' + fmt(lc.checkedAt) + ')' : ''));
+                }
+                $('ytDetail').textContent = detail.join(' ');
+                $('ytRemove').disabled = s.source !== 'uploaded';
+            }
+
+            function busy(on) { on ? Dashboard.showLoadingMsg() : Dashboard.hideLoadingMsg(); }
+
+            function load() {
+                api('GET', 'Cookies').then(render);
+                ApiClient.getPluginConfiguration(pluginId).then(function (c) {
+                    $('ytMaxResults').value = c.MaxResults;
+                    $('ytCacheMinutes').value = c.SearchCacheMinutes;
+                    $('ytChannel').value = c.UpdateChannel || 'nightly';
+                    $('ytCookiesPath').value = c.CookiesPath || '';
+                });
+            }
+
+            $('ytRefresh').addEventListener('click', function () {
+                busy(true);
+                api('POST', 'Cookies/Check').then(render).catch(function () {
+                    $('ytDetail').textContent = 'Check failed. See the Jellyfin log.';
+                }).then(function () { busy(false); });
+            });
+
+            $('ytRemove').addEventListener('click', function () {
+                if (!confirm('Remove the uploaded cookies from the server?')) { return; }
+                api('DELETE', 'Cookies').then(render);
+            });
+
+            $('ytCookieFile').addEventListener('change', function (e) {
+                var f = e.target.files[0];
+                if (!f) { return; }
+                var r = new FileReader();
+                r.onload = function () { $('ytCookieText').value = r.result; };
+                r.readAsText(f);
+            });
+
+            $('ytUpload').addEventListener('click', function () {
+                var text = $('ytCookieText').value;
+                $('ytUploadMsg').textContent = '';
+                if (!text.trim()) { $('ytUploadMsg').textContent = 'Paste or choose a cookies.txt first.'; return; }
+                busy(true);
+                api('PUT', 'Cookies', { Cookies: text }).then(function (s) {
+                    $('ytCookieText').value = '';
+                    $('ytCookieFile').value = '';
+                    render(s);
+                    $('ytUploadMsg').textContent = 'Uploaded. Press Refresh to check that they work.';
+                }).catch(function (resp) {
+                    var msg = 'Upload failed.';
+                    if (resp && resp.json) {
+                        resp.json().then(function (p) { $('ytUploadMsg').textContent = p.detail || msg; });
+                    } else { $('ytUploadMsg').textContent = msg; }
+                }).then(function () { busy(false); });
+            });
+
+            page.querySelector('.ytForm').addEventListener('submit', function (e) {
+                e.preventDefault();
+                busy(true);
+                ApiClient.getPluginConfiguration(pluginId).then(function (c) {
+                    c.MaxResults = parseInt($('ytMaxResults').value, 10) || 10;
+                    c.SearchCacheMinutes = parseInt($('ytCacheMinutes').value, 10) || 0;
+                    c.UpdateChannel = $('ytChannel').value;
+                    c.CookiesPath = $('ytCookiesPath').value.trim();
+                    ApiClient.updatePluginConfiguration(pluginId, c).then(function (r) {
+                        Dashboard.processPluginConfigurationUpdateResult(r);
+                        load();
+                    });
+                });
+                return false;
+            });
+
+            page.addEventListener('pageshow', load);
+        })();
+    </script>
+</div>
+</body>
+</html>

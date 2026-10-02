@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Net.Http;
 using System.Runtime.InteropServices;
 using System.Text.Json;
@@ -15,12 +16,14 @@ namespace Jellyfin.Plugin.YtSearch.Services;
 public class YtDlpService
 {
     private readonly IApplicationPaths _paths;
+    private readonly CookieService _cookies;
     private readonly ILogger<YtDlpService> _logger;
     private readonly SemaphoreSlim _installLock = new(1, 1);
 
-    public YtDlpService(IApplicationPaths paths, ILogger<YtDlpService> logger)
+    public YtDlpService(IApplicationPaths paths, CookieService cookies, ILogger<YtDlpService> logger)
     {
         _paths = paths;
+        _cookies = cookies;
         _logger = logger;
     }
 
@@ -39,6 +42,7 @@ public class YtDlpService
         psi.ArgumentList.Add("--flat-playlist");
         psi.ArgumentList.Add("-J");
         psi.ArgumentList.Add("--no-warnings");
+        AddCookies(psi);
 
         using var proc = Process.Start(psi) ?? throw new InvalidOperationException("Could not start yt-dlp");
         var stderrTask = proc.StandardError.ReadToEndAsync(ct);
@@ -88,6 +92,105 @@ public class YtDlpService
 
     private static string? Str(JsonElement e, string name) =>
         e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+
+    /// <summary>Adds --cookies when a cookie file is available. Use for every yt-dlp call that talks to YouTube.</summary>
+    public void AddCookies(ProcessStartInfo psi)
+    {
+        if (_cookies.ActivePath is { } path)
+        {
+            psi.ArgumentList.Add("--cookies");
+            psi.ArgumentList.Add(path);
+        }
+    }
+
+    /// <summary>
+    /// Verifies the cookies by reading the account's Liked videos playlist, which only works when signed in.
+    /// </summary>
+    public async Task<CheckResult> CheckCookiesAsync(CancellationToken ct)
+    {
+        CheckResult result;
+        if (_cookies.ActivePath is null)
+        {
+            result = new CheckResult { State = "none", Message = "No cookies uploaded." };
+        }
+        else
+        {
+            result = await RunCheckAsync(ct).ConfigureAwait(false);
+        }
+
+        result.CheckedAt = DateTime.UtcNow;
+        _cookies.SetLastCheck(result);
+        return result;
+    }
+
+    private async Task<CheckResult> RunCheckAsync(CancellationToken ct)
+    {
+        try
+        {
+            var bin = await EnsureBinaryAsync(ct).ConfigureAwait(false);
+            var psi = new ProcessStartInfo(bin)
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+            };
+            AddCookies(psi);
+            foreach (var a in new[] { "--flat-playlist", "--playlist-items", "1", "--no-warnings", "-J", "https://www.youtube.com/playlist?list=LL" })
+            {
+                psi.ArgumentList.Add(a);
+            }
+
+            using var proc = Process.Start(psi) ?? throw new InvalidOperationException("Could not start yt-dlp");
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(TimeSpan.FromSeconds(45));
+            var stdout = proc.StandardOutput.ReadToEndAsync(cts.Token);
+            var stderr = proc.StandardError.ReadToEndAsync(cts.Token);
+            try
+            {
+                await proc.WaitForExitAsync(cts.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                try { proc.Kill(true); } catch (InvalidOperationException) { }
+                return new CheckResult { State = "error", Message = "Check timed out. YouTube did not respond in 45 seconds." };
+            }
+
+            await stdout.ConfigureAwait(false);
+            var err = await stderr.ConfigureAwait(false);
+            if (proc.ExitCode == 0)
+            {
+                return new CheckResult { State = "working", Message = "Cookies are working. YouTube sees you as signed in." };
+            }
+
+            return ClassifyFailure(err);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Cookie check failed");
+            return new CheckResult { State = "error", Message = "Could not run the check: " + ex.Message };
+        }
+    }
+
+    internal static CheckResult ClassifyFailure(string stderr)
+    {
+        var lower = stderr.ToLowerInvariant();
+        if (lower.Contains("no longer valid") || lower.Contains("rotated"))
+        {
+            return new CheckResult { State = "failing", Message = "YouTube has rotated or invalidated these cookies. Export a fresh cookies.txt from a private window and upload it again." };
+        }
+
+        if (lower.Contains("sign in") || lower.Contains("log in") || lower.Contains("login") || lower.Contains("does not exist") || lower.Contains("private") || lower.Contains("cookies"))
+        {
+            return new CheckResult { State = "failing", Message = "YouTube did not accept the cookies (not signed in or expired). Upload a fresh cookies.txt." };
+        }
+
+        var last = stderr.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).LastOrDefault() ?? "unknown error";
+        return new CheckResult { State = "error", Message = "yt-dlp failed: " + (last.Length > 300 ? last[..300] : last) };
+    }
 
     /// <summary>Runs yt-dlp's built-in updater on the configured channel (nightly by default).</summary>
     public async Task UpdateAsync(CancellationToken ct)
