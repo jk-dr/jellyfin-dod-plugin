@@ -126,3 +126,14 @@ public class CleanupPolicyTests
     [Fact] public void KeepsTrackYoungerThanAWeek() => Assert.False(Delete(ageDays: 6));
     [Fact] public void DeletesAtExactlyAWeek() => Assert.True(Delete(ageDays: 7));
 }
+
+public class PlayabilityTests
+{
+    [Theory]
+    [InlineData("ERROR: [soundcloud] 253508261: This video is DRM protected", true)]
+    [InlineData("ERROR: [soundcloud] 1: Requested format is not available. Use --list-formats", true)]
+    [InlineData("ERROR: Unable to download JSON metadata: <urlopen error timed out>", false)]
+    [InlineData("ERROR: HTTP Error 429: Too Many Requests", false)]
+    public void ClassifiesPermanentFailures(string stderr, bool permanent) =>
+        Assert.Equal(permanent, Jellyfin.Plugin.YtSearch.Services.YtDlpService.IsPermanentFailure(stderr));
+}

@@ -68,6 +68,12 @@
                     </div>
                     <div class="checkboxContainer checkboxContainer-withDescription">
                         <label>
+                            <input id="scHideDrm" type="checkbox" is="emby-checkbox" />
+                            <span>Hide SoundCloud tracks that can't be downloaded (DRM / 30-second previews)</span>
+                        </label>
+                    </div>
+                    <div class="checkboxContainer checkboxContainer-withDescription">
+                        <label>
                             <input id="clEnabled" type="checkbox" is="emby-checkbox" />
                             <span>Auto-delete old tracks</span>
                         </label>
@@ -172,6 +178,7 @@
                 ApiClient.getPluginConfiguration(pluginId).then(function (c) {
                     $('ytMaxResults').value = c.MaxResults;
                     $('clEnabled').checked = c.EnableCleanup !== false;
+                    $('scHideDrm').checked = c.HideUnplayableSoundCloud !== false;
                     $('clMaxPlays').value = c.CleanupMaxPlays;
                     $('clDays').value = c.CleanupRetentionDays;
                     $('scMaxResults').value = c.SoundCloudMaxResults;
@@ -226,6 +233,7 @@
                 ApiClient.getPluginConfiguration(pluginId).then(function (c) {
                     c.MaxResults = Math.max(0, parseInt($('ytMaxResults').value, 10) || 0);
                     c.EnableCleanup = $('clEnabled').checked;
+                    c.HideUnplayableSoundCloud = $('scHideDrm').checked;
                     c.CleanupMaxPlays = Math.max(0, parseInt($('clMaxPlays').value, 10) || 0);
                     c.CleanupRetentionDays = Math.max(0, parseInt($('clDays').value, 10) || 0);
                     c.SoundCloudMaxResults = Math.max(0, parseInt($('scMaxResults').value, 10) || 0);

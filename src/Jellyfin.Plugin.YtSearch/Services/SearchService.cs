@@ -76,12 +76,59 @@ public class SearchService
         }
     }
 
+    /// <summary>Drops tracks that can't be downloaded (DRM, preview-only). Inconclusive checks keep the track.</summary>
+    private async Task<List<TrackResult>> FilterPlayableAsync(List<TrackResult> tracks)
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        using var gate = new SemaphoreSlim(10);
+        var verdicts = await Task.WhenAll(tracks.Select(async t =>
+        {
+            if (_registry.GetPlayable(t.TrackId) is { } known)
+            {
+                return known;
+            }
+
+            await gate.WaitAsync(cts.Token).ConfigureAwait(false);
+            try
+            {
+                var ok = await _ytdlp.CheckDownloadableAsync(t, cts.Token).ConfigureAwait(false);
+                if (ok.HasValue)
+                {
+                    _registry.SetPlayable(t.TrackId, ok.Value);
+                }
+
+                return ok ?? true;
+            }
+            catch (OperationCanceledException)
+            {
+                return true;
+            }
+            finally
+            {
+                gate.Release();
+            }
+        })).ConfigureAwait(false);
+
+        var kept = tracks.Where((_, i) => verdicts[i]).ToList();
+        if (kept.Count < tracks.Count)
+        {
+            _logger.LogInformation("Hid {Count} undownloadable SoundCloud results (DRM or preview-only)", tracks.Count - kept.Count);
+        }
+
+        return kept;
+    }
+
     private async Task<IReadOnlyList<TrackResult>> RunAsync(string source, string query, int max)
     {
         var timeout = TimeSpan.FromSeconds(Math.Max(Plugin.Instance?.Configuration.SearchTimeoutSeconds ?? 8, 1));
         using var cts = new CancellationTokenSource(timeout);
         var raw = await _ytdlp.SearchAsync(source, query, max, cts.Token).ConfigureAwait(false);
         var results = raw.Select(_library.WithId).ToList();
+        if (source == Sources.SoundCloud && (Plugin.Instance?.Configuration.HideUnplayableSoundCloud ?? true))
+        {
+            results = await FilterPlayableAsync(results).ConfigureAwait(false);
+        }
+
         _registry.Add(results);
 
         _logger.LogInformation("{Source} search '{Query}' -> {Count} results", source, query, results.Count);

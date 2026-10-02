@@ -31,6 +31,9 @@ public class PluginConfiguration : BasePluginConfiguration
     /// <summary>Max YouTube results per search.</summary>
     public int MaxResults { get; set; } = 10;
 
+    /// <summary>Hide SoundCloud results that can't be downloaded (DRM / preview-only).</summary>
+    public bool HideUnplayableSoundCloud { get; set; } = true;
+
     public bool EnableSoundCloud { get; set; } = true;
 
     public int SoundCloudMaxResults { get; set; } = 10;

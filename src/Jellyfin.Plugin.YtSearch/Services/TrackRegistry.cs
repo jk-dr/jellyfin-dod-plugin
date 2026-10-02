@@ -18,12 +18,13 @@ public class TrackRegistry
     private const int MaxEntries = 20000;
     private static readonly TimeSpan MaxAge = TimeSpan.FromDays(60);
 
-    private sealed record Stored(string Source, string SourceId, string Title, string Artist, double Duration, string Thumb, string PageUrl, DateTime LastSeen);
+    private sealed record Stored(string Source, string SourceId, string Title, string Artist, double Duration, string Thumb, string PageUrl, DateTime LastSeen, bool? Playable = null);
 
     private readonly string _file;
     private readonly ILogger<TrackRegistry> _logger;
     private readonly LibraryService _library;
     private readonly ConcurrentDictionary<Guid, (TrackResult Track, DateTime LastSeen)> _byId = new();
+    private readonly ConcurrentDictionary<Guid, bool> _playable = new();
     private readonly object _saveLock = new();
     private bool _loaded;
     private DateTime _lastSave = DateTime.MinValue;
@@ -46,6 +47,20 @@ public class TrackRegistry
 
         track = null!;
         return false;
+    }
+
+    /// <summary>Remembered answer to "can this be downloaded?", or null if never checked.</summary>
+    public bool? GetPlayable(Guid trackId)
+    {
+        EnsureLoaded();
+        return _playable.TryGetValue(trackId, out var v) ? v : null;
+    }
+
+    public void SetPlayable(Guid trackId, bool playable)
+    {
+        EnsureLoaded();
+        _playable[trackId] = playable;
+        SaveSoon();
     }
 
     public void Add(IEnumerable<TrackResult> tracks)
@@ -85,6 +100,10 @@ public class TrackRegistry
                         var t = _library.WithId(new TrackResult(s.Source, s.SourceId, s.Title, s.Artist, s.Duration, s.Thumb, s.PageUrl));
                         _byId[t.TrackId] = (t, s.LastSeen);
                         _byId[t.AlbumId] = (t, s.LastSeen);
+                        if (s.Playable is { } p)
+                        {
+                            _playable[t.TrackId] = p;
+                        }
                     }
                 }
             }
@@ -118,7 +137,7 @@ public class TrackRegistry
                 .Select(g => g.First())
                 .OrderByDescending(v => v.LastSeen)
                 .Take(MaxEntries)
-                .Select(v => new Stored(v.Track.Source, v.Track.SourceId, v.Track.Title, v.Track.Artist, v.Track.DurationSeconds, v.Track.ThumbnailUrl, v.Track.PageUrl, v.LastSeen))
+                .Select(v => new Stored(v.Track.Source, v.Track.SourceId, v.Track.Title, v.Track.Artist, v.Track.DurationSeconds, v.Track.ThumbnailUrl, v.Track.PageUrl, v.LastSeen, _playable.TryGetValue(v.Track.TrackId, out var pl) ? pl : null))
                 .ToList();
             Directory.CreateDirectory(Path.GetDirectoryName(_file)!);
             File.WriteAllText(_file + ".tmp", JsonSerializer.Serialize(rows));

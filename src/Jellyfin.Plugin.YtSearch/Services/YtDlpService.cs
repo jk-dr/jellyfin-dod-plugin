@@ -199,6 +199,65 @@ public class YtDlpService
         return file;
     }
 
+    /// <summary>
+    /// Asks yt-dlp whether the m4a download would work, without downloading. True = yes, false = permanently not
+    /// (DRM, preview-only, removed), null = inconclusive (network error, timeout), so the caller keeps the track.
+    /// </summary>
+    public async Task<bool?> CheckDownloadableAsync(TrackResult track, CancellationToken ct)
+    {
+        try
+        {
+            var bin = await EnsureBinaryAsync(ct).ConfigureAwait(false);
+            var psi = new ProcessStartInfo(bin)
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+            };
+            foreach (var a in new[] { "-f", "bestaudio[ext=m4a]", "--simulate", "--no-playlist", "--no-warnings", "-q", track.PageUrl })
+            {
+                psi.ArgumentList.Add(a);
+            }
+
+            if (track.Source == Sources.YouTube)
+            {
+                AddCookies(psi);
+            }
+
+            using var proc = Process.Start(psi) ?? throw new InvalidOperationException("Could not start yt-dlp");
+            var stdout = proc.StandardOutput.ReadToEndAsync(ct);
+            var stderr = proc.StandardError.ReadToEndAsync(ct);
+            try
+            {
+                await proc.WaitForExitAsync(ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                try { proc.Kill(true); } catch (InvalidOperationException) { }
+                throw;
+            }
+
+            await stdout.ConfigureAwait(false);
+            return proc.ExitCode == 0 ? true : IsPermanentFailure(await stderr.ConfigureAwait(false)) ? false : null;
+        }
+        catch (OperationCanceledException)
+        {
+            return null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Playability check failed for {Id}", track.SourceId);
+            return null;
+        }
+    }
+
+    internal static bool IsPermanentFailure(string stderr)
+    {
+        var l = stderr.ToLowerInvariant();
+        return l.Contains("drm") || l.Contains("requested format is not available") || l.Contains("private video")
+            || l.Contains("video unavailable") || l.Contains("has been removed") || l.Contains("does not exist") || l.Contains("404");
+    }
+
     internal static string ClassifyDownloadError(string stderr)
     {
         var l = stderr.ToLowerInvariant();
