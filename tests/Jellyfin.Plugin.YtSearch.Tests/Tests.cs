@@ -670,6 +670,29 @@ public class DuplicateAndArtistSearchTests
     }
 
     [Fact]
+    public void ArtistDashSongTitlesMatchTheBareSongByTheSameArtist()
+    {
+        var d = Jellyfin.Plugin.YtSearch.Services.SearchService.AreSameSong(
+            T(Yt, "aaaaaaaaaaa", "Cher - Believe", "Cher - Topic", 240), T(Sc, "1", "Believe", "Cher", 241));
+        Assert.True(d);
+        Assert.True(Jellyfin.Plugin.YtSearch.Services.SearchService.AreSameSong(
+            T(Yt, "aaaaaaaaaaa", "Believe - Cher", "Some Uploader", 240), T(Sc, "1", "Cher - Believe", "Cher", 240)));
+        // same one-word title, different artists: different songs
+        Assert.False(Jellyfin.Plugin.YtSearch.Services.SearchService.AreSameSong(
+            T(Yt, "aaaaaaaaaaa", "Cher - Believe", "Cher", 240), T(Sc, "1", "Believe", "Justin Bieber", 240)));
+        Assert.True(Jellyfin.Plugin.YtSearch.Services.SearchService.AreSameSong(
+            T(Yt, "aaaaaaaaaaa", "Daft Punk - One More Time", "Daft Punk - Topic", 320), T(Sc, "1", "One More Time", "Daft Punk", 320)));
+    }
+
+    [Fact]
+    public void SongsOfDifferentLengthAreBothShown()
+    {
+        Assert.True(Jellyfin.Plugin.YtSearch.Services.SearchService.AreSameSong(T(Yt, "aaaaaaaaaaa", "Get Lucky", dur: 369), T(Sc, "1", "Get Lucky", dur: 372)));
+        Assert.False(Jellyfin.Plugin.YtSearch.Services.SearchService.AreSameSong(T(Yt, "aaaaaaaaaaa", "Get Lucky", dur: 369), T(Sc, "1", "Get Lucky", dur: 248)));
+        Assert.False(Jellyfin.Plugin.YtSearch.Services.SearchService.AreSameSong(T(Yt, "aaaaaaaaaaa", "Get Lucky", dur: 200), T(Sc, "1", "Get Lucky", dur: 215)));
+    }
+
+    [Fact]
     public void DifferentSongsAreNotDuplicates()
     {
         Assert.False(Same("Get Lucky", "Lose Yourself to Dance"));

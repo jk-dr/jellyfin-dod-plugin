@@ -35,7 +35,8 @@ Appends YouTube and SoundCloud results to Jellyfin's standard search API (`/Item
   albums/artists you already have is never overwritten. System folders (`/`, `/etc`, `/usr`, ...) are refused.
   Users only get online results if they may use that library (administrators and users with all libraries do).
 - **Same song on both sites:** if a song is on YouTube and SoundCloud with the same name, only one is shown: the
-  one you already downloaded, otherwise the YouTube one. Copies on the same site are left alone.
+  one you already downloaded, otherwise the YouTube one. "Artist - Song" and "Song - Artist" titles count as the song's name. Copies whose lengths
+  differ by more than a few seconds (3%) are different recordings and both stay. Copies on the same site are left alone.
 - **Artists:** several artists in a credit ("A, B & C") each get their own artist; " - Topic" is dropped from channel
   names. Opening an artist adds that artist's songs from the sites; artists of search results have a page too.
 - **Artist and album folders:** every song is filed as `Artist/Album/yt-ID.m4a` inside the library, and the folders are

@@ -167,8 +167,9 @@ public class SearchService
     /// </summary>
     internal static bool AreSameSong(TrackResult a, TrackResult b)
     {
+        // Different lengths are different recordings (radio edit, extended mix, a live take): both stay.
         if (a.DurationSeconds > 0 && b.DurationSeconds > 0
-            && Math.Abs(a.DurationSeconds - b.DurationSeconds) > Math.Max(20, 0.15 * Math.Max(a.DurationSeconds, b.DurationSeconds)))
+            && Math.Abs(a.DurationSeconds - b.DurationSeconds) > Math.Max(5, 0.03 * Math.Max(a.DurationSeconds, b.DurationSeconds)))
         {
             return false;
         }
@@ -178,20 +179,38 @@ public class SearchService
             return false;
         }
 
-        var ta = SongWords(a);
-        var tb = SongWords(b);
+        // "Artist - Song" and "Song - Artist" titles: the artist's own words are not part of the song's name.
+        var artistsA = ArtistWords(a);
+        var artistsB = ArtistWords(b);
+        var artists = artistsA.Union(artistsB).ToHashSet();
+        var ta = SongWords(a, artists);
+        var tb = SongWords(b, artists);
         var (small, large) = ta.Count <= tb.Count ? (ta, tb) : (tb, ta);
-        return small.Count >= 2 && small.IsSubsetOf(large);
+        if (small.Count >= 2)
+        {
+            return small.IsSubsetOf(large);
+        }
+
+        // A one-word song name ("Believe") only matches the same word by the same artist: the credits overlap, or one
+        // title names the other upload's artist ("Cher - Believe" next to "Believe" by Cher).
+        var empty = new HashSet<string>();
+        var namesOtherArtist = SongWords(a, empty).Overlaps(artistsB) || SongWords(b, empty).Overlaps(artistsA);
+        return small.Count == 1 && small.SetEquals(large) && (artistsA.Overlaps(artistsB) || namesOtherArtist);
     }
 
     private static readonly Regex FeaturingTail = new(@"\s(?:feat\.?|ft\.?|featuring|with)\s.*$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex BracketGroups = new(@"\([^)]*\)|\[[^\]]*\]", RegexOptions.Compiled);
 
-    private static HashSet<string> SongWords(TrackResult r)
+    private static HashSet<string> SongWords(TrackResult r, ISet<string> artistWords)
     {
         var title = BracketGroups.Replace(FeaturingTail.Replace(r.DisplayTitle, string.Empty), " ");
-        return RelevanceRanker.Tokens(title).Where(w => !MetadataMatcher.IsFillerWord(w)).ToHashSet();
+        var words = RelevanceRanker.Tokens(title).Where(w => !MetadataMatcher.IsFillerWord(w)).ToHashSet();
+        var withoutArtist = words.Where(w => !artistWords.Contains(w)).ToHashSet();
+        return withoutArtist.Count > 0 ? withoutArtist : words; // a song named like its artist keeps its words
     }
+
+    private static HashSet<string> ArtistWords(TrackResult r) =>
+        RelevanceRanker.Tokens(string.Join(" ", r.ArtistNames)).Where(w => !MetadataMatcher.IsFillerWord(w)).ToHashSet();
 
     private static HashSet<string> NoiseWords(TrackResult r) =>
         RelevanceRanker.Tokens(r.DisplayTitle).Where(RelevanceRanker.IsNoiseWord).ToHashSet();
