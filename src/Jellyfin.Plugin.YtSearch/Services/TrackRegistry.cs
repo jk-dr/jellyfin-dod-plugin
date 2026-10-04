@@ -54,6 +54,22 @@ public class TrackRegistry
         return _bySource.Values.Select(v => v.Track).Where(t => t.Meta is not null && t.AlbumId == albumId).OrderBy(t => t.Meta!.DiscNumber ?? 1).ThenBy(t => t.Meta!.TrackNumber ?? 999).ThenBy(t => t.DisplayTitle).ToList();
     }
 
+    /// <summary>Finds the track (and the artist's name) behind an artist id handed out in search results.</summary>
+    public (TrackResult Track, string Name)? FindArtist(Guid artistId)
+    {
+        EnsureLoaded();
+        foreach (var track in _bySource.Values.Select(v => v.Track))
+        {
+            var name = track.ArtistNameFor(artistId);
+            if (name is not null)
+            {
+                return (track, name);
+            }
+        }
+
+        return null;
+    }
+
     /// <summary>Overrides the placement of a track (the user put it in an album of their choosing).</summary>
     public void Replace(TrackResult placed)
     {

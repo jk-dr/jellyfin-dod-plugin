@@ -5,6 +5,9 @@ using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using Jellyfin.Data;
+using Jellyfin.Database.Implementations.Entities;
+using Jellyfin.Database.Implementations.Enums;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Audio;
@@ -44,8 +47,59 @@ public class LibraryService
         _logger = logger;
     }
 
-    public string Root =>
-        Plugin.Instance?.Configuration.LibraryPath is { Length: > 0 } p ? p : Path.Combine(_paths.DataPath, "ytsearch", "library");
+    // Folders that can't be the library itself ...
+    private static readonly string[] ForbiddenExactly = { "/", "/home", "/opt", "/tmp", "/var" };
+
+    // ... and system trees nothing may be written into.
+    private static readonly string[] ForbiddenTrees = { "/etc", "/bin", "/sbin", "/usr", "/lib", "/lib32", "/lib64", "/proc", "/sys", "/dev", "/boot", "/root", "/run" };
+
+    private string DefaultRoot => Path.Combine(_paths.DataPath, "ytsearch", "library");
+
+    /// <summary>The folder downloads go into: the library folder the user chose in the settings, else the plugin's own.</summary>
+    public string Root
+    {
+        get
+        {
+            var configured = Plugin.Instance?.Configuration.LibraryPath;
+            if (string.IsNullOrWhiteSpace(configured))
+            {
+                return DefaultRoot;
+            }
+
+            if (IsAcceptableRoot(configured))
+            {
+                return configured.Trim().TrimEnd('/');
+            }
+
+            if (!_warnedAboutRoot)
+            {
+                _warnedAboutRoot = true;
+                _logger.LogWarning("The library folder '{Path}' in the settings is not usable (must be an absolute, non-system folder); using the plugin's own library", configured);
+            }
+
+            return DefaultRoot;
+        }
+    }
+
+    private bool _warnedAboutRoot;
+
+    /// <summary>An absolute path that is not "/" or a system directory (or inside one) and has no ".." in it.</summary>
+    internal static bool IsAcceptableRoot(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return false;
+        }
+
+        var trimmed = path.Trim().TrimEnd('/');
+        if (!trimmed.StartsWith('/') || trimmed.Split('/').Contains("..") || trimmed.Any(char.IsControl))
+        {
+            return false;
+        }
+
+        return !ForbiddenExactly.Contains(trimmed, StringComparer.Ordinal)
+            && !ForbiddenTrees.Any(t => trimmed.Equals(t, StringComparison.Ordinal) || trimmed.StartsWith(t + "/", StringComparison.Ordinal));
+    }
 
     /// <summary>Where the file for this track lives: Root/AlbumArtist/Album/yt-ID.m4a, or Root/yt-ID.m4a without an album.</summary>
     public string PathFor(TrackResult r)
@@ -65,7 +119,7 @@ public class LibraryService
         }
 
         var path = r.Meta is { } m
-            ? Path.Combine(root, InputGuard.SafeFolderName(m.AlbumArtist, 80), InputGuard.SafeFolderName(m.Album, 100), name)
+            ? Path.Combine(root, InputGuard.SafeFolderName(r.PrimaryAlbumArtist, 80), InputGuard.SafeFolderName(m.Album, 100), name)
             : Path.Combine(root, name);
 
         // Whatever the metadata said, the file must end up inside the library folder.
@@ -109,8 +163,14 @@ public class LibraryService
         return depth <= 2 && !path.Contains("/../", StringComparison.Ordinal);
     }
 
-    public long LibrarySizeBytes() =>
-        Directory.Exists(Root) ? new DirectoryInfo(Root).EnumerateFiles("*.m4a", SearchOption.AllDirectories).Sum(f => f.Length) : 0;
+    /// <summary>Space used by the files this plugin downloaded (not the rest of a library the user may have pointed it at).</summary>
+    public long LibrarySizeBytes()
+    {
+        var root = Root;
+        return Directory.Exists(root)
+            ? new DirectoryInfo(root).EnumerateFiles("*.m4a", SearchOption.AllDirectories).Where(f => IsOurFile(root, f.FullName)).Sum(f => f.Length)
+            : 0;
+    }
 
     public BaseItem? GetItem(Guid id) => _library.GetItemById(id);
 
@@ -121,8 +181,16 @@ public class LibraryService
     public async Task PromoteAsync(TrackResult r, string taggedFile, CancellationToken ct)
     {
         var path = PathFor(r);
-        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        File.Move(taggedFile, path, true);
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.Move(taggedFile, path, true);
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
+        {
+            _logger.LogWarning("Could not write to {Folder}: {Message}", Path.GetDirectoryName(path), ex.Message);
+            throw new DownloadException("Jellyfin can't write to the library folder (read-only mount or permissions?). Check the Library setting.");
+        }
 
         await IndexAsync(Path.GetDirectoryName(path)!, ct).ConfigureAwait(false);
 
@@ -167,9 +235,18 @@ public class LibraryService
                 ReplaceAllImages = true,
             };
             await _providers.RefreshSingleItem(item, options, ct).ConfigureAwait(false);
+
+            // The album and artist above it may already exist (even be the user's own): fill in what is missing, never overwrite.
+            var fillOnly = new MetadataRefreshOptions(new DirectoryService(_fileSystem))
+            {
+                MetadataRefreshMode = MetadataRefreshMode.FullRefresh,
+                ImageRefreshMode = MetadataRefreshMode.FullRefresh,
+                ReplaceAllMetadata = false,
+                ReplaceAllImages = false,
+            };
             for (var parent = item.GetParent(); parent is MusicAlbum or MusicArtist; parent = parent.GetParent())
             {
-                await _providers.RefreshSingleItem(parent, options, ct).ConfigureAwait(false);
+                await _providers.RefreshSingleItem(parent, fillOnly, ct).ConfigureAwait(false);
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -182,7 +259,7 @@ public class LibraryService
     /// Asks Jellyfin to look at <paramref name="folder"/> now: the nearest folder Jellyfin already knows (the album, the artist,
     /// or the library root), so only a small part of the library is scanned.
     /// </summary>
-    public async Task IndexAsync(string folder, CancellationToken ct)
+    public async Task IndexAsync(string folder, CancellationToken ct, bool recursive = true)
     {
         await _scanLock.WaitAsync(ct).ConfigureAwait(false);
         try
@@ -192,7 +269,7 @@ public class LibraryService
                 if (_library.FindByPath(dir, true) is Folder known)
                 {
                     var options = new MetadataRefreshOptions(new DirectoryService(_fileSystem));
-                    await known.ValidateChildren(new Progress<double>(), options, true, false, ct).ConfigureAwait(false);
+                    await known.ValidateChildren(new Progress<double>(), options, recursive, false, ct).ConfigureAwait(false);
                     return;
                 }
             }
@@ -205,7 +282,7 @@ public class LibraryService
             }
 
             Directory.CreateDirectory(root);
-            if (!_library.GetVirtualFolders().Any(f => f.Locations.Any(l => string.Equals(l.TrimEnd('/'), root, StringComparison.Ordinal))))
+            if (LibraryContaining(root) is null)
             {
                 _logger.LogInformation("Creating Jellyfin music library '{Name}' at {Root}", LibraryName, Root);
                 await _library.AddVirtualFolder(LibraryName, CollectionTypeOptions.music, NewLibraryOptions(Root), false).ConfigureAwait(false);
@@ -216,6 +293,106 @@ public class LibraryService
         finally
         {
             _scanLock.Release();
+        }
+    }
+
+    /// <summary>The Jellyfin library whose folder is (or contains) <paramref name="folder"/>.</summary>
+    private VirtualFolderInfo? LibraryContaining(string folder)
+    {
+        var f = folder.TrimEnd('/');
+        return _library.GetVirtualFolders().FirstOrDefault(v => v.Locations.Any(l =>
+        {
+            var loc = l.TrimEnd('/');
+            return f.Equals(loc, StringComparison.Ordinal) || f.StartsWith(loc + "/", StringComparison.Ordinal);
+        }));
+    }
+
+    /// <summary>Creates the music library if it does not exist yet (nothing happens when the chosen folder is already in a library).</summary>
+    public async Task EnsureLibraryAsync(CancellationToken ct)
+    {
+        await _scanLock.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            var root = Root.TrimEnd('/');
+            Directory.CreateDirectory(root);
+            var existed = LibraryContaining(root) is not null;
+            if (!existed)
+            {
+                _logger.LogInformation("Creating Jellyfin music library '{Name}' at {Root}", LibraryName, Root);
+                await _library.AddVirtualFolder(LibraryName, CollectionTypeOptions.music, NewLibraryOptions(Root), false).ConfigureAwait(false);
+            }
+
+            if (!existed || _library.FindByPath(root, true) is null)
+            {
+                await _library.ValidateMediaLibrary(new Progress<double>(), ct).ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            _scanLock.Release();
+        }
+    }
+
+    /// <summary>
+    /// Online results are only added for users who may use the library downloads go to: administrators, users with access
+    /// to all libraries, and users with this library enabled. Disabled users never.
+    /// </summary>
+    public bool UserCanUse(User user) => Allows(
+        user.HasPermission(PermissionKind.IsAdministrator),
+        user.HasPermission(PermissionKind.IsDisabled),
+        user.HasPermission(PermissionKind.EnableAllFolders),
+        user.GetPreferenceValues<Guid>(PreferenceKind.EnabledFolders),
+        OurLibraryId());
+
+    internal static bool Allows(bool isAdministrator, bool isDisabled, bool allFolders, IEnumerable<Guid> enabledFolders, Guid? libraryId)
+    {
+        if (isDisabled)
+        {
+            return false;
+        }
+
+        if (isAdministrator || allFolders)
+        {
+            return true;
+        }
+
+        return libraryId is { } id && enabledFolders.Contains(id);
+    }
+
+    private Guid? OurLibraryId() =>
+        LibraryContaining(Root) is { } lib && Guid.TryParse(lib.ItemId, out var id) ? id : null;
+
+    /// <summary>The name of an artist Jellyfin already knows.</summary>
+    public string? ArtistName(Guid id) => _library.GetItemById(id) is MusicArtist artist ? artist.Name : null;
+
+    /// <summary>Music libraries (and their folders) the downloads can go into, plus the one in use now.</summary>
+    public (string Path, bool Exists, bool Writable, string? LibraryName, bool UsingDefault) CurrentLibrary()
+    {
+        var root = Root;
+        var exists = Directory.Exists(root);
+        return (root, exists, exists && CanWrite(root), LibraryContaining(root)?.Name, string.IsNullOrWhiteSpace(Plugin.Instance?.Configuration.LibraryPath) || root == DefaultRoot);
+    }
+
+    public IReadOnlyList<(string Name, string Path, bool Writable)> MusicLibraries() =>
+        _library.GetVirtualFolders()
+            .Where(v => v.CollectionType == CollectionTypeOptions.music)
+            .SelectMany(v => v.Locations.Select(l => (v.Name, Path: l.TrimEnd('/'))))
+            .Where(l => IsAcceptableRoot(l.Path))
+            .Select(l => (l.Name, l.Path, Directory.Exists(l.Path) && CanWrite(l.Path)))
+            .ToList();
+
+    internal static bool CanWrite(string folder)
+    {
+        try
+        {
+            var probe = Path.Combine(folder, "." + Guid.NewGuid().ToString("N") + ".tmp");
+            File.WriteAllBytes(probe, Array.Empty<byte>());
+            File.Delete(probe);
+            return true;
+        }
+        catch (Exception)
+        {
+            return false;
         }
     }
 
@@ -239,28 +416,29 @@ public class LibraryService
         return (album.Name, album.AlbumArtists.FirstOrDefault() ?? string.Empty, album.Path.TrimEnd('/'));
     }
 
-    /// <summary>Removes empty album/artist folders left behind after deletions and lets Jellyfin drop their items.</summary>
-    public async Task PruneEmptyFoldersAsync(CancellationToken ct)
+    /// <summary>
+    /// Removes the album/artist folders that deleted tracks left empty (and only those: never other empty folders, never the
+    /// library root) and lets Jellyfin drop their items.
+    /// </summary>
+    public async Task PruneEmptyFoldersAsync(IEnumerable<string> folders, CancellationToken ct)
     {
         var root = Root.TrimEnd('/');
-        if (!Directory.Exists(root))
+        string? changedAbove = null;
+        foreach (var start in folders.Distinct())
         {
-            return;
-        }
-
-        var removed = false;
-        foreach (var dir in Directory.EnumerateDirectories(root, "*", SearchOption.AllDirectories).OrderByDescending(d => d.Length))
-        {
-            if (!Directory.EnumerateFileSystemEntries(dir).Any())
+            var dir = start.TrimEnd('/');
+            while (dir.StartsWith(root + "/", StringComparison.Ordinal) && Directory.Exists(dir) && !Directory.EnumerateFileSystemEntries(dir).Any())
             {
                 Directory.Delete(dir);
-                removed = true;
+                dir = Path.GetDirectoryName(dir)!.TrimEnd('/');
+                changedAbove = dir;
             }
         }
 
-        if (removed)
+        if (changedAbove is not null)
         {
-            await IndexAsync(root, ct).ConfigureAwait(false);
+            // Just the nearest remaining folder, one level: enough for Jellyfin to drop the missing album/artist, cheap on a big library.
+            await IndexAsync(changedAbove, ct, recursive: false).ConfigureAwait(false);
         }
     }
 

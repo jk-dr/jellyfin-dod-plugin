@@ -534,3 +534,257 @@ public class AlbumPolicyTests
         Assert.Equal("Some Song (Official)", m.Title);
     }
 }
+
+public class ArtistTests
+{
+    private static System.Collections.Generic.IReadOnlyList<string> Split(string? s) => Jellyfin.Plugin.YtSearch.Services.ArtistSplitter.Split(s);
+
+    [Theory]
+    [InlineData("Daft Punk, Pharrell Williams & Nile Rodgers", new[] { "Daft Punk", "Pharrell Williams", "Nile Rodgers" })]
+    [InlineData("Simon & Garfunkel", new[] { "Simon & Garfunkel" })]
+    [InlineData("Earth, Wind & Fire", new[] { "Earth, Wind & Fire" })]
+    [InlineData("Tyler, The Creator", new[] { "Tyler, The Creator" })]
+    [InlineData("Billie Eilish feat. Khalid", new[] { "Billie Eilish", "Khalid" })]
+    [InlineData("Calvin Harris ft. Rihanna", new[] { "Calvin Harris", "Rihanna" })]
+    [InlineData("Metro Boomin x Future", new[] { "Metro Boomin", "Future" })]
+    [InlineData("Eminem vs. Rihanna", new[] { "Eminem", "Rihanna" })]
+    [InlineData("Daft Punk", new[] { "Daft Punk" })]
+    [InlineData("Hall & Oates, Simon & Garfunkel", new[] { "Hall & Oates", "Simon & Garfunkel" })]
+    public void SplitsCreditsButKeepsBandNamesWhole(string credit, string[] expected) => Assert.Equal(expected, Split(credit));
+
+    [Fact]
+    public void NeverReturnsAnEmptyList()
+    {
+        Assert.Equal(new[] { string.Empty }, Split(null));
+        Assert.Equal(new[] { string.Empty }, Split("   "));
+        Assert.Single(Split("&"));
+    }
+
+    [Fact]
+    public void RemovesDuplicatesIgnoringCase() => Assert.Equal(new[] { "Drake" }, Split("Drake, DRAKE"));
+
+    private static Jellyfin.Plugin.YtSearch.Services.TrackResult T(string artist) =>
+        new("youtube", "aaaaaaaaaaa", "Song", artist, 200, "", "");
+
+    [Theory]
+    [InlineData("Daft Punk - Topic", "Daft Punk")]
+    [InlineData("Daft Punk – Topic", "Daft Punk")]
+    [InlineData("Daft Punk", "Daft Punk")]
+    [InlineData("Topic", "Topic")]
+    [InlineData("- Topic", "- Topic")]
+    [InlineData("", "")]
+    public void StripsTheAutomaticTopicSuffix(string raw, string expected) =>
+        Assert.Equal(expected, Jellyfin.Plugin.YtSearch.Services.TrackResult.StripTopic(raw));
+
+    [Fact]
+    public void ArtistsComeFromTheCleanChannelNameAndAreSplit()
+    {
+        var t = T("Daft Punk - Topic");
+        Assert.Equal("Daft Punk", t.DisplayArtist);
+        var multi = T("Daft Punk, Pharrell Williams");
+        Assert.Equal(new[] { "Daft Punk", "Pharrell Williams" }, multi.ArtistNames);
+        Assert.Equal("Daft Punk", multi.PrimaryAlbumArtist);
+        Assert.Equal(multi.ArtistIdFor("Daft Punk"), multi.ArtistId);
+        Assert.NotEqual(multi.ArtistIdFor("Daft Punk"), multi.ArtistIdFor("Pharrell Williams"));
+    }
+
+    [Fact]
+    public void FindsWhichArtistAnIdBelongsTo()
+    {
+        var t = T("Daft Punk, Pharrell Williams");
+        Assert.Equal("Pharrell Williams", t.ArtistNameFor(t.ArtistIdFor("Pharrell Williams")));
+        Assert.Null(t.ArtistNameFor(System.Guid.NewGuid()));
+    }
+
+    [Fact]
+    public void ArtistIdsAreSharedAcrossTracksOfTheSameArtist()
+    {
+        var a = new Jellyfin.Plugin.YtSearch.Services.TrackResult("youtube", "aaaaaaaaaaa", "One", "Daft Punk", 200, "", "");
+        var b = new Jellyfin.Plugin.YtSearch.Services.TrackResult("youtube", "bbbbbbbbbbb", "Two", "Daft Punk - Topic", 200, "", "");
+        Assert.Equal(a.ArtistId, b.ArtistId);
+    }
+
+    [Fact]
+    public void TagsListEveryArtistAndTheFirstAlbumArtist()
+    {
+        var meta = new Jellyfin.Plugin.YtSearch.Services.TrackMeta("Get Lucky", "Daft Punk, Pharrell Williams", "RAM", "Daft Punk", 2013, 8, 1, "Pop");
+        var t = T("x") with { Meta = meta };
+        var tags = Jellyfin.Plugin.YtSearch.Services.AudioTagger.Tags(t).ToDictionary(x => x.Key, x => x.Value);
+        Assert.Equal("Daft Punk; Pharrell Williams", tags["artist"]);
+        Assert.Equal("Daft Punk", tags["album_artist"]);
+        Assert.Equal("RAM", tags["album"]);
+    }
+
+    [Fact]
+    public void ArtistPageJsonHasTheArtistIdOfThatName()
+    {
+        var t = T("Daft Punk, Pharrell Williams");
+        var json = Jellyfin.Plugin.YtSearch.Middleware.SearchAppendMiddleware.Artist(t, "Pharrell Williams", "srv");
+        Assert.Equal("MusicArtist", (string)json["Type"]!);
+        Assert.Equal(t.ArtistIdFor("Pharrell Williams").ToString("N"), (string)json["Id"]!);
+    }
+
+    [Fact]
+    public void TrackJsonListsAllArtistsEachWithItsOwnId()
+    {
+        var t = T("Daft Punk, Pharrell Williams");
+        var json = Jellyfin.Plugin.YtSearch.Middleware.SearchAppendMiddleware.Item(t, "srv");
+        Assert.Equal(2, json["Artists"]!.AsArray().Count);
+        Assert.Equal(2, json["ArtistItems"]!.AsArray().Count);
+        Assert.Equal(t.ArtistIdFor("Pharrell Williams").ToString("N"), (string)json["ArtistItems"]![1]!["Id"]!);
+        Assert.Equal("Daft Punk", (string)json["AlbumArtist"]!);
+    }
+}
+
+public class DuplicateAndArtistSearchTests
+{
+    private static Jellyfin.Plugin.YtSearch.Services.TrackResult T(string src, string id, string title, string artist = "X", double dur = 213) =>
+        new(src, id, title, artist, dur, "", "");
+
+    private const string Yt = Jellyfin.Plugin.YtSearch.Services.Sources.YouTube;
+    private const string Sc = Jellyfin.Plugin.YtSearch.Services.Sources.SoundCloud;
+
+    private static System.Collections.Generic.List<string> Dedupe(Jellyfin.Plugin.YtSearch.Services.TrackResult[] all, params string[] downloaded) =>
+        Jellyfin.Plugin.YtSearch.Services.SearchService.DedupeAcrossSources(all, r => downloaded.Contains(r.Key)).Select(r => r.Key).ToList();
+
+    [Fact]
+    public void SameSongOnBothSitesKeepsYouTubeWhenNothingIsDownloaded()
+    {
+        var all = new[] { T(Sc, "1", "Get Lucky"), T(Yt, "aaaaaaaaaaa", "Get Lucky") };
+        Assert.Equal(new[] { "youtube:aaaaaaaaaaa" }, Dedupe(all));
+    }
+
+    [Fact]
+    public void ADownloadedSoundCloudCopyWinsOverANewYouTubeOne()
+    {
+        var all = new[] { T(Sc, "1", "Get Lucky"), T(Yt, "aaaaaaaaaaa", "Get Lucky") };
+        Assert.Equal(new[] { "soundcloud:1" }, Dedupe(all, "soundcloud:1"));
+    }
+
+    [Fact]
+    public void ADownloadedYouTubeCopyWinsOverSoundCloud()
+    {
+        var all = new[] { T(Sc, "1", "Get Lucky"), T(Yt, "aaaaaaaaaaa", "Get Lucky") };
+        Assert.Equal(new[] { "youtube:aaaaaaaaaaa" }, Dedupe(all, "youtube:aaaaaaaaaaa"));
+    }
+
+    [Fact]
+    public void WhenBothAreDownloadedBothStay()
+    {
+        var all = new[] { T(Sc, "1", "Get Lucky"), T(Yt, "aaaaaaaaaaa", "Get Lucky") };
+        Assert.Equal(2, Dedupe(all, "soundcloud:1", "youtube:aaaaaaaaaaa").Count);
+    }
+
+    [Fact]
+    public void NameDifferencesLikeOfficialAudioArtistOrderAndFeaturingDontMatter()
+    {
+        Assert.True(Same("Daft Punk - Get Lucky (Official Audio) ft. Pharrell Williams", "Get Lucky - Daft Punk"));
+        Assert.True(Same("Rick Astley - Never Gonna Give You Up (Official Video)", "Never Gonna Give You Up"));
+        Assert.True(Same("GET LUCKY!", "get lucky"));
+    }
+
+    [Fact]
+    public void RemixesCoversAndDifferentLengthsAreNotDuplicates()
+    {
+        Assert.False(Same("Get Lucky", "Get Lucky (Remix)"));
+        Assert.False(Same("Get Lucky", "Get Lucky cover"));
+        Assert.False(Same("Get Lucky", "Get Lucky live"));
+        Assert.False(Jellyfin.Plugin.YtSearch.Services.SearchService.AreSameSong(T(Yt, "aaaaaaaaaaa", "Get Lucky", dur: 369), T(Sc, "1", "Get Lucky", dur: 36000)));
+    }
+
+    [Fact]
+    public void DifferentSongsAreNotDuplicates()
+    {
+        Assert.False(Same("Get Lucky", "Lose Yourself to Dance"));
+        Assert.False(Same("Believe", "Believe Me")); // a one-word title never matches by subset
+        // two or more shared words and the same length is treated as the same song (a title plus the artist name)
+        Assert.Single(Dedupe(new[] { T(Sc, "1", "Love Story Taylor Swift", dur: 200), T(Yt, "aaaaaaaaaaa", "Love Story", dur: 200) }));
+    }
+
+    [Fact]
+    public void CopiesOnTheSameSiteAreLeftAlone()
+    {
+        var all = new[] { T(Yt, "aaaaaaaaaaa", "Get Lucky"), T(Yt, "bbbbbbbbbbb", "Get Lucky"), T(Sc, "1", "Another Song"), T(Sc, "2", "Another Song") };
+        Assert.Equal(4, Dedupe(all).Count);
+    }
+
+    private static bool Same(string a, string b) =>
+        Jellyfin.Plugin.YtSearch.Services.SearchService.AreSameSong(T(Yt, "aaaaaaaaaaa", a), T(Sc, "1", b));
+
+    [Fact]
+    public void ArtistSongsKeepOnlyThoseByTheArtistAndNoLongMixes()
+    {
+        var results = new[]
+        {
+            T(Sc, "1", "Get Lucky", "Daft Punk"),
+            T(Yt, "aaaaaaaaaaa", "Daft Punk - One More Time", "Some Fan Channel"),
+            T(Yt, "bbbbbbbbbbb", "Harder Better Faster", "Daft Punk - Topic"),
+            T(Yt, "ccccccccccc", "Totally Different Artist Song", "Other"),
+            T(Yt, "ddddddddddd", "Daft Punk Megamix", "Daft Punk", 3600),
+        };
+        var kept = Jellyfin.Plugin.YtSearch.Services.SearchService.FilterArtistSongs("daft punk", results).Select(r => r.Key).ToList();
+        Assert.Equal(new[] { "youtube:aaaaaaaaaaa", "youtube:bbbbbbbbbbb", "soundcloud:1" }, kept); // YouTube first
+    }
+
+    [Fact]
+    public void ArtistSongsOfNothingIsEmpty() =>
+        Assert.Empty(Jellyfin.Plugin.YtSearch.Services.SearchService.FilterArtistSongs("   ", new[] { T(Yt, "aaaaaaaaaaa", "x") }));
+}
+
+public class LibraryChoiceTests
+{
+    [Theory]
+    [InlineData("/media/music", true)]
+    [InlineData("/music", true)]
+    [InlineData("/data/Music Library/Songs", true)]
+    [InlineData("/var/lib/jellyfin/music", true)]
+    [InlineData("/mnt/nas/music/", true)]
+    [InlineData("/", false)]
+    [InlineData("", false)]
+    [InlineData("   ", false)]
+    [InlineData(null, false)]
+    [InlineData("music", false)]
+    [InlineData("../music", false)]
+    [InlineData("/media/../etc", false)]
+    [InlineData("/etc", false)]
+    [InlineData("/etc/jellyfin", false)]
+    [InlineData("/usr/lib/x", false)]
+    [InlineData("/proc/self", false)]
+    [InlineData("/dev/shm", false)]
+    [InlineData("/root/music", false)]
+    [InlineData("/var", false)]
+    [InlineData("/home", false)]
+    [InlineData("/tmp", false)]
+    [InlineData("/media/mu\u0007sic", false)]
+    public void OnlySensibleFoldersCanBeTheLibrary(string? path, bool ok) =>
+        Assert.Equal(ok, Jellyfin.Plugin.YtSearch.Services.LibraryService.IsAcceptableRoot(path));
+
+    private static readonly System.Guid Lib = System.Guid.NewGuid();
+
+    [Fact]
+    public void AdminsAndAllFoldersUsersAreAllowedDisabledNever()
+    {
+        Assert.True(Jellyfin.Plugin.YtSearch.Services.LibraryService.Allows(true, false, false, new System.Guid[0], null));
+        Assert.True(Jellyfin.Plugin.YtSearch.Services.LibraryService.Allows(false, false, true, new System.Guid[0], null));
+        Assert.False(Jellyfin.Plugin.YtSearch.Services.LibraryService.Allows(true, true, true, new[] { Lib }, Lib));
+    }
+
+    [Fact]
+    public void OtherUsersNeedTheLibraryEnabled()
+    {
+        Assert.True(Jellyfin.Plugin.YtSearch.Services.LibraryService.Allows(false, false, false, new[] { Lib }, Lib));
+        Assert.False(Jellyfin.Plugin.YtSearch.Services.LibraryService.Allows(false, false, false, new[] { System.Guid.NewGuid() }, Lib));
+        Assert.False(Jellyfin.Plugin.YtSearch.Services.LibraryService.Allows(false, false, false, new[] { Lib }, null));
+    }
+
+    [Theory]
+    [InlineData("/media/music", "/media/music/yt-dQw4w9WgXcQ.m4a", true)]
+    [InlineData("/media/music", "/media/music/Artist/Album/sc-123.m4a", true)]
+    [InlineData("/media/music", "/media/music/Artist/Album/My Own Song.m4a", false)]
+    [InlineData("/media/music", "/media/music/Artist/Album/Disc 1/yt-dQw4w9WgXcQ.m4a", false)]
+    [InlineData("/media/music", "/media/music2/yt-dQw4w9WgXcQ.m4a", false)]
+    [InlineData("/media/music", "/media/other/yt-dQw4w9WgXcQ.m4a", false)]
+    [InlineData("/media/music", "/media/music/Artist/yt-dQw4w9WgXcQ.mp3", false)]
+    public void CleanupOnlyEverTouchesFilesThePluginCreatedInTheChosenLibrary(string root, string path, bool ours) =>
+        Assert.Equal(ours, Jellyfin.Plugin.YtSearch.Services.LibraryService.IsOurFile(root, path));
+}

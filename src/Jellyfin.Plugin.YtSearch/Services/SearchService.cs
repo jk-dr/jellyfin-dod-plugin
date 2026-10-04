@@ -2,6 +2,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -18,6 +19,11 @@ public class SearchService
     private readonly TrackRegistry _registry;
     private readonly ILogger<SearchService> _logger;
     private readonly ConcurrentDictionary<string, (DateTime Expires, Task<IReadOnlyList<TrackResult>> Task)> _cache = new();
+    private readonly object _cacheLock = new();
+
+    // An artist page asks for more songs per source than a normal search, but skips long mixes and compilations.
+    private const int ArtistPerSource = 30;
+    private const double MaxSongSeconds = 15 * 60;
 
     public SearchService(YtDlpService ytdlp, OnlineSearchClient online, CatalogClient catalog, LibraryService library, TrackRegistry registry, ILogger<SearchService> logger)
     {
@@ -37,7 +43,7 @@ public class SearchService
     public void Replace(TrackResult placed) => _registry.Replace(placed);
 
     /// <summary>Searches every enabled source in parallel; results come back ordered by relevance, with album metadata where known.</summary>
-    public async Task<IReadOnlyList<TrackResult>> SearchAsync(string query, CancellationToken ct)
+    public async Task<IReadOnlyList<TrackResult>> SearchAsync(string query, CancellationToken ct, int? perSource = null)
     {
         query = InputGuard.CleanQuery(query);
         if (query.Length < 3)
@@ -45,14 +51,15 @@ public class SearchService
             return Array.Empty<TrackResult>();
         }
 
+        _catalog.Prefetch(query); // the album lookup runs while the sites are searched
         var cfg = Plugin.Instance?.Configuration;
         var tasks = new List<Task<IReadOnlyList<TrackResult>>>
         {
-            SearchSourceAsync(Sources.YouTube, query, Math.Clamp(cfg?.MaxResults ?? 10, 0, 50), ct),
+            SearchSourceAsync(Sources.YouTube, query, Limit(cfg?.MaxResults, perSource), ct),
         };
         if (cfg?.EnableSoundCloud ?? true)
         {
-            tasks.Add(SearchSourceAsync(Sources.SoundCloud, query, Math.Clamp(cfg?.SoundCloudMaxResults ?? 10, 0, 50), ct));
+            tasks.Add(SearchSourceAsync(Sources.SoundCloud, query, Limit(cfg?.SoundCloudMaxResults, perSource), ct));
         }
 
         var raw = (await Task.WhenAll(tasks).ConfigureAwait(false)).SelectMany(r => r).ToList();
@@ -79,9 +86,120 @@ public class SearchService
             var chosen = AlbumPolicy.Apply(cfg2?.AlbumMode, cfg2?.FixedAlbumName, cfg2?.FixedAlbumArtist, r, catalog);
             return _library.WithId(chosen is null ? r : r with { Meta = chosen, ThumbnailUrl = catalog?.ArtworkUrl ?? r.ThumbnailUrl });
         }).OrderBy(r => canonical.Contains(r.Key) ? 0 : 1).ToList();
+        var shown = DedupeAcrossSources(finals, r => _library.IsPromoted(r.TrackId));
+        if (shown.Count < finals.Count)
+        {
+            _logger.LogInformation("Hid {Count} copies of songs that are on both YouTube and SoundCloud", finals.Count - shown.Count);
+        }
+
         _registry.Add(finals);
-        return finals;
+        return shown;
     }
+
+    private static int Limit(int? configured, int? perSource)
+    {
+        var max = Math.Clamp(configured ?? 10, 0, 50);
+        return max > 0 && perSource is { } n ? Math.Clamp(n, 1, 50) : max;
+    }
+
+    /// <summary>Songs by an artist (for opening an artist that is not in the library yet), not already downloaded.</summary>
+    public async Task<IReadOnlyList<TrackResult>> SearchArtistAsync(string artist, CancellationToken ct) =>
+        FilterArtistSongs(artist, await SearchAsync(artist, ct, ArtistPerSource).ConfigureAwait(false))
+            .Where(r => !_library.IsPromoted(r.TrackId))
+            .ToList();
+
+    /// <summary>Keeps results that are by the artist (channel name, credit, or "Artist - Title" title), no long mixes; YouTube first.</summary>
+    internal static List<TrackResult> FilterArtistSongs(string artist, IReadOnlyList<TrackResult> results)
+    {
+        var wanted = RelevanceRanker.Tokens(artist).ToHashSet();
+        if (wanted.Count == 0)
+        {
+            return new List<TrackResult>();
+        }
+
+        bool IsBy(TrackResult r) =>
+            wanted.IsSubsetOf(RelevanceRanker.Tokens(r.DisplayArtist))
+            || wanted.IsSubsetOf(RelevanceRanker.Tokens(r.CleanArtist))
+            || wanted.IsSubsetOf(RelevanceRanker.Tokens(TitleArtistPart(r.Title)));
+
+        return results.Where(r => IsBy(r) && r.DurationSeconds <= MaxSongSeconds).OrderBy(r => r.Source == Sources.YouTube ? 0 : 1).ToList();
+    }
+
+    /// <summary>The "Artist" of an "Artist - Title" style upload title.</summary>
+    private static string TitleArtistPart(string title)
+    {
+        var m = Regex.Match(title ?? string.Empty, @"^(.+?)\s+[-–—]\s+.+$");
+        return m.Success ? m.Groups[1].Value : string.Empty;
+    }
+
+    public (TrackResult Track, string Name)? FindArtist(Guid artistId) => _registry.FindArtist(artistId);
+
+    /// <summary>
+    /// The same song on both sites: if you already have one copy, only that one is shown; otherwise YouTube wins and the
+    /// SoundCloud copy is hidden. Copies on the same site are left alone.
+    /// </summary>
+    internal static List<TrackResult> DedupeAcrossSources(IReadOnlyList<TrackResult> results, Func<TrackResult, bool> isDownloaded)
+    {
+        var hide = new HashSet<string>();
+        foreach (var sc in results.Where(r => r.Source == Sources.SoundCloud))
+        {
+            var copies = results.Where(y => y.Source == Sources.YouTube && AreSameSong(y, sc)).ToList();
+            if (copies.Count == 0)
+            {
+                continue;
+            }
+
+            if (isDownloaded(sc))
+            {
+                // Already have it from SoundCloud: don't offer a second download from YouTube.
+                foreach (var y in copies.Where(y => !isDownloaded(y)))
+                {
+                    hide.Add(y.Key);
+                }
+            }
+            else
+            {
+                hide.Add(sc.Key); // a YouTube copy exists (downloaded or not): YouTube is preferred
+            }
+        }
+
+        return results.Where(r => !hide.Contains(r.Key)).ToList();
+    }
+
+    /// <summary>
+    /// Same title once brackets, "feat." parts and filler like "official audio" are ignored (either may carry the artist's
+    /// name too: "Artist - Title" vs "Title"), similar length, and neither is a remix/cover/live version the other is not.
+    /// </summary>
+    internal static bool AreSameSong(TrackResult a, TrackResult b)
+    {
+        if (a.DurationSeconds > 0 && b.DurationSeconds > 0
+            && Math.Abs(a.DurationSeconds - b.DurationSeconds) > Math.Max(20, 0.15 * Math.Max(a.DurationSeconds, b.DurationSeconds)))
+        {
+            return false;
+        }
+
+        if (!NoiseWords(a).SetEquals(NoiseWords(b)))
+        {
+            return false;
+        }
+
+        var ta = SongWords(a);
+        var tb = SongWords(b);
+        var (small, large) = ta.Count <= tb.Count ? (ta, tb) : (tb, ta);
+        return small.Count >= 2 && small.IsSubsetOf(large);
+    }
+
+    private static readonly Regex FeaturingTail = new(@"\s(?:feat\.?|ft\.?|featuring|with)\s.*$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex BracketGroups = new(@"\([^)]*\)|\[[^\]]*\]", RegexOptions.Compiled);
+
+    private static HashSet<string> SongWords(TrackResult r)
+    {
+        var title = BracketGroups.Replace(FeaturingTail.Replace(r.DisplayTitle, string.Empty), " ");
+        return RelevanceRanker.Tokens(title).Where(w => !MetadataMatcher.IsFillerWord(w)).ToHashSet();
+    }
+
+    private static HashSet<string> NoiseWords(TrackResult r) =>
+        RelevanceRanker.Tokens(r.DisplayTitle).Where(RelevanceRanker.IsNoiseWord).ToHashSet();
 
     /// <summary>One source; a failure is logged and yields no results so the other sources still show.</summary>
     private async Task<IReadOnlyList<TrackResult>> SearchSourceAsync(string source, string query, int max, CancellationToken ct)
@@ -95,16 +213,22 @@ public class SearchService
         {
             var ttl = TimeSpan.FromMinutes(Math.Max(Plugin.Instance?.Configuration.SearchCacheMinutes ?? 5, 0));
             var key = $"{source}|{query.Trim().ToLowerInvariant()}|{max}";
-            if (!_cache.TryGetValue(key, out var entry) || entry.Expires < DateTime.UtcNow || entry.Task.IsFaulted)
+            Task<IReadOnlyList<TrackResult>> task;
+            lock (_cacheLock)
             {
-                PruneCache();
+                if (!_cache.TryGetValue(key, out var entry) || entry.Expires < DateTime.UtcNow || entry.Task.IsFaulted)
+                {
+                    PruneCache();
 
-                // Not tied to the request token: a cancelled request shouldn't poison the shared task.
-                entry = (DateTime.UtcNow + ttl, RunAsync(source, query, max));
-                _cache[key] = entry;
+                    // Not tied to the request token: a cancelled request shouldn't poison the shared task.
+                    entry = (DateTime.UtcNow + ttl, RunAsync(source, query, max));
+                    _cache[key] = entry;
+                }
+
+                task = entry.Task;
             }
 
-            return await entry.Task.WaitAsync(ct).ConfigureAwait(false);
+            return await task.WaitAsync(ct).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {

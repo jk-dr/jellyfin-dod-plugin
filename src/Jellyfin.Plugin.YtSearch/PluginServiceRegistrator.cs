@@ -25,6 +25,7 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
         serviceCollection.AddSingleton<FailureLog>();
         serviceCollection.AddSingleton<SearchService>();
         serviceCollection.AddHostedService<YtDlpUpdater>();
+        serviceCollection.AddHostedService<LibraryBootstrapper>();
         serviceCollection.AddTransient<IStartupFilter, YtStartupFilter>();
     }
 

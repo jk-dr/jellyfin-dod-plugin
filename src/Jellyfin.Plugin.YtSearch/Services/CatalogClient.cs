@@ -17,10 +17,12 @@ namespace Jellyfin.Plugin.YtSearch.Services;
 public class CatalogClient
 {
     private static readonly TimeSpan CacheTtl = TimeSpan.FromMinutes(30);
+    private static readonly TimeSpan MaxWait = TimeSpan.FromSeconds(3);
 
     private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(5) };
     private readonly ILogger<CatalogClient> _logger;
     private readonly ConcurrentDictionary<string, (DateTime Expires, Task<IReadOnlyList<CatalogSong>> Task)> _cache = new();
+    private readonly object _cacheLock = new();
     private DateTime _blockedUntil = DateTime.MinValue;
 
     public CatalogClient(ILogger<CatalogClient> logger)
@@ -28,17 +30,20 @@ public class CatalogClient
         _logger = logger;
     }
 
-    /// <summary>Metadata keyed by <see cref="TrackResult.Key"/>. Never throws.</summary>
-    public async Task<Dictionary<string, TrackMeta>> GetMetaAsync(string query, IReadOnlyList<TrackResult> ranked, CancellationToken ct)
+    /// <summary>Starts the lookup now (shares the cache), so it runs while the site searches do.</summary>
+    public void Prefetch(string query)
     {
-        if (!(Plugin.Instance?.Configuration.LookUpAlbums ?? true) || ranked.Count == 0 || DateTime.UtcNow < _blockedUntil)
+        if ((Plugin.Instance?.Configuration.LookUpAlbums ?? true) && DateTime.UtcNow >= _blockedUntil)
         {
-            return new Dictionary<string, TrackMeta>();
+            _ = SongsFor(query);
         }
+    }
 
-        try
+    private Task<IReadOnlyList<CatalogSong>> SongsFor(string query)
+    {
+        var key = query.Trim().ToLowerInvariant();
+        lock (_cacheLock)
         {
-            var key = query.Trim().ToLowerInvariant();
             if (!_cache.TryGetValue(key, out var entry) || entry.Expires < DateTime.UtcNow || entry.Task.IsFaulted)
             {
                 if (_cache.Count > 300)
@@ -50,12 +55,31 @@ public class CatalogClient
                 _cache[key] = entry;
             }
 
-            var songs = await entry.Task.WaitAsync(ct).ConfigureAwait(false);
+            return entry.Task;
+        }
+    }
+
+    /// <summary>Metadata keyed by <see cref="TrackResult.Key"/>. Waits at most a few seconds; never throws.</summary>
+    public async Task<Dictionary<string, TrackMeta>> GetMetaAsync(string query, IReadOnlyList<TrackResult> ranked, CancellationToken ct)
+    {
+        if (!(Plugin.Instance?.Configuration.LookUpAlbums ?? true) || ranked.Count == 0 || DateTime.UtcNow < _blockedUntil)
+        {
+            return new Dictionary<string, TrackMeta>();
+        }
+
+        try
+        {
+            var songs = await SongsFor(query).WaitAsync(MaxWait, ct).ConfigureAwait(false);
             return MetadataMatcher.Match(ranked, songs);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
             throw;
+        }
+        catch (TimeoutException)
+        {
+            _logger.LogInformation("Album lookup took over {Seconds}s; results stay without albums this time", MaxWait.TotalSeconds);
+            return new Dictionary<string, TrackMeta>();
         }
         catch (Exception ex)
         {

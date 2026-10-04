@@ -99,6 +99,23 @@
                         <input id="ytCacheMinutes" type="number" is="emby-input" min="0" max="120" />
                     </div>
                     <div class="selectContainer">
+                        <label class="selectLabel" for="libSel">Library downloads go into</label>
+                        <select id="libSel" is="emby-select">
+                            <option value="">The plugin's own library (created automatically)</option>
+                            <option value="__custom">Another folder...</option>
+                        </select>
+                        <div class="fieldDescription">
+                            Pick one of your music libraries and songs are saved into it as Artist/Album folders, so they sit with your own music.
+                            Only files this plugin created (yt-*.m4a and sc-*.m4a) are ever deleted by the cleanup, and the size limit counts only those.
+                            Changing it affects new downloads; songs already downloaded stay where they are.
+                        </div>
+                        <div id="libStatus" class="fieldDescription"></div>
+                    </div>
+                    <div id="libCustomBox" class="inputContainer" style="display:none;">
+                        <label class="inputLabel inputLabelUnfocused" for="libCustom">Folder (a path inside the Jellyfin container)</label>
+                        <input id="libCustom" type="text" is="emby-input" placeholder="/media/music" />
+                    </div>
+                    <div class="selectContainer">
                         <label class="selectLabel" for="albumMode">Where downloaded songs go</label>
                         <select id="albumMode" is="emby-select">
                             <option value="auto">Their real album when known, otherwise as a loose song</option>
@@ -242,6 +259,7 @@
                     $('dbgAll').checked = c.LogAllApiRequests === true;
                     $('scHideDrm').checked = c.HideUnplayableSoundCloud !== false;
                     $('albumMode').value = c.AlbumMode || 'auto';
+                    loadLibraries(c.LibraryPath || '');
                     $('albumName').value = c.FixedAlbumName || '';
                     $('albumArtist').value = c.FixedAlbumArtist || '';
                     $('clMaxPlays').value = c.CleanupMaxPlays;
@@ -300,6 +318,7 @@
                     c.EnableCleanup = $('clEnabled').checked;
                     c.LogAllApiRequests = $('dbgAll').checked;
                     c.HideUnplayableSoundCloud = $('scHideDrm').checked;
+                    c.LibraryPath = $('libSel').value === '__custom' ? $('libCustom').value.trim() : $('libSel').value;
                     c.AlbumMode = $('albumMode').value;
                     c.FixedAlbumName = $('albumName').value.trim() || 'YouTube & SoundCloud';
                     c.FixedAlbumArtist = $('albumArtist').value.trim() || 'Various Artists';
@@ -335,6 +354,32 @@
                 });
             }
             $('failRefresh').addEventListener('click', loadFailures);
+
+            function loadLibraries(configuredPath) {
+                api('GET', 'Libraries').then(function (info) {
+                    var sel = $('libSel');
+                    while (sel.options.length > 2) { sel.remove(2); }
+                    var known = false;
+                    info.libraries.forEach(function (l) {
+                        var o = document.createElement('option');
+                        o.value = l.path;
+                        o.textContent = l.name + ' \u2014 ' + l.path + (l.writable ? '' : ' (Jellyfin cannot write here)');
+                        sel.insertBefore(o, sel.options[sel.options.length - 1]);
+                        if (l.path === configuredPath) { known = true; }
+                    });
+                    if (!configuredPath) { sel.value = ''; }
+                    else if (known) { sel.value = configuredPath; }
+                    else { sel.value = '__custom'; $('libCustom').value = configuredPath; }
+                    $('libCustomBox').style.display = sel.value === '__custom' ? 'block' : 'none';
+                    var c = info.current;
+                    var text = 'In use now: ' + c.path + (c.libraryName ? ' (library "' + c.libraryName + '")' : '');
+                    if (!c.exists) { text += ' \u2014 \u26A0 the folder does not exist yet; it is created on the first download'; }
+                    else if (!c.writable) { text += ' \u2014 \u26A0 Jellyfin cannot write to it, downloads will fail. Check the folder permissions or the container mount (read-only?).'; }
+                    else { text += ' \u2014 writable \u2714'; }
+                    $('libStatus').textContent = text;
+                });
+            }
+            $('libSel').addEventListener('change', function () { $('libCustomBox').style.display = this.value === '__custom' ? 'block' : 'none'; });
 
             function destinationQuery() {
                 var v = $('faDest').value;

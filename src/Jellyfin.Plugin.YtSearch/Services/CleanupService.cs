@@ -96,6 +96,7 @@ public class CleanupService
             var playing = _sessions.Sessions.Select(s => s.NowPlayingItem?.Id).Where(i => i.HasValue).Select(i => i!.Value).ToHashSet();
             var now = DateTime.UtcNow;
             var deleted = 0;
+            var emptied = new List<string>();
             foreach (var track in tracks)
             {
                 if (track.Id == exclude || playing.Contains(track.Id))
@@ -125,14 +126,19 @@ public class CleanupService
                 if (CleanupPolicy.ShouldDelete(plays, favorite, inPlaylist.Contains(track.Id), lastActivity, now, cfg.CleanupMaxPlays, cfg.CleanupRetentionDays))
                 {
                     _logger.LogInformation("Cleanup: deleting '{Name}' (plays {Plays}, last activity {Last:u})", track.Name, plays, lastActivity);
+                    var folder = System.IO.Path.GetDirectoryName(track.Path);
                     _libraryService.Delete(track);
                     deleted++;
+                    if (folder is not null)
+                    {
+                        emptied.Add(folder);
+                    }
                 }
             }
 
             if (deleted > 0)
             {
-                await _libraryService.PruneEmptyFoldersAsync(CancellationToken.None).ConfigureAwait(false);
+                await _libraryService.PruneEmptyFoldersAsync(emptied, CancellationToken.None).ConfigureAwait(false);
             }
 
             return deleted;

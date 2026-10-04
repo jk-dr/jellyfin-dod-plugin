@@ -68,8 +68,8 @@ public class AudioTagger
     {
         var m = track.Meta;
         yield return ("title", m?.Title ?? track.Title);
-        yield return ("artist", m?.Artist ?? track.Artist);
-        yield return ("album_artist", m?.AlbumArtist ?? track.Artist);
+        yield return ("artist", string.Join("; ", track.ArtistNames));
+        yield return ("album_artist", track.PrimaryAlbumArtist);
         if (m is null)
         {
             yield break;

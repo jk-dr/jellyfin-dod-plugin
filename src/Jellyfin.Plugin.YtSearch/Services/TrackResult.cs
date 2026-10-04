@@ -1,6 +1,9 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace Jellyfin.Plugin.YtSearch.Services;
 
@@ -41,18 +44,41 @@ public sealed record TrackResult(string Source, string SourceId, string Title, s
         init => _albumId = value;
     }
 
-    public Guid ArtistId => StableGuid($"{Source}-artist:{DisplayArtist}");
+    /// <summary>Each artist of the credit separately ("A, B &amp; C" gives three), band names like "Simon &amp; Garfunkel" kept whole.</summary>
+    public IReadOnlyList<string> ArtistNames => ArtistSplitter.Split(DisplayArtist);
+
+    /// <summary>The first album artist: the one folders and the album are filed under.</summary>
+    public string PrimaryAlbumArtist => ArtistSplitter.Split(DisplayAlbumArtist)[0];
+
+    /// <summary>The id of the first (main) artist.</summary>
+    public Guid ArtistId => ArtistIdFor(ArtistNames[0]);
+
+    public Guid ArtistIdFor(string name) => StableGuid($"{Source}-artist:{name}");
+
+    /// <summary>The artist of this track (or its album) that has the given id, if any.</summary>
+    public string? ArtistNameFor(Guid id) => ArtistNames.Concat(ArtistSplitter.Split(DisplayAlbumArtist)).FirstOrDefault(n => ArtistIdFor(n) == id);
 
     public string DisplayTitle => Meta?.Title ?? Title;
 
-    public string DisplayArtist => Meta?.Artist ?? Artist;
+    /// <summary>The channel name without YouTube's automatic " - Topic" suffix.</summary>
+    public string CleanArtist => StripTopic(Artist);
 
-    public string DisplayAlbumArtist => Meta?.AlbumArtist ?? Artist;
+    public string DisplayArtist => Meta?.Artist ?? CleanArtist;
+
+    public string DisplayAlbumArtist => Meta?.AlbumArtist ?? CleanArtist;
 
     /// <summary>Tag used in image tags so clients cache per track.</summary>
     public string ImageTag => (Source == Sources.YouTube ? "yt" : "sc") + SourceId;
 
     public string Key => $"{Source}:{SourceId}";
+
+    private static readonly Regex TopicSuffix = new(@"\s*[-–—]\s*Topic\s*$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    internal static string StripTopic(string? artist)
+    {
+        var stripped = TopicSuffix.Replace(artist ?? string.Empty, string.Empty).Trim();
+        return stripped.Length > 0 ? stripped : artist ?? string.Empty;
+    }
 
     private static Guid StableGuid(string key) => new(MD5.HashData(Encoding.UTF8.GetBytes(key)));
 }

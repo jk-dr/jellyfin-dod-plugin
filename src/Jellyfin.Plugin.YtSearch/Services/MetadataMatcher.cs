@@ -27,6 +27,8 @@ public static class MetadataMatcher
         "mv", "m", "v", "clip", "single", "edit", "radio", "album", "from", "version",
     };
 
+    public static bool IsFillerWord(string word) => Filler.Contains(word);
+
     /// <summary>
     /// Returns metadata keyed by <see cref="TrackResult.Key"/> for results that confidently match a catalog song.
     /// Each song goes to one upload only (the artist's own channel first), so an album never lists the same song several times.

@@ -16,14 +16,14 @@ public static class AlbumPolicy
 
         var album = InputGuard.CleanText(fixedAlbum, 200, "YouTube & SoundCloud");
         var albumArtist = InputGuard.CleanText(fixedAlbumArtist, 200, "Various Artists");
-        var basis = catalog ?? new TrackMeta(r.Title, r.Artist, album, albumArtist, null, null, null, null, null);
+        var basis = catalog ?? new TrackMeta(r.Title, r.CleanArtist, album, albumArtist, null, null, null, null, null);
         return basis with { Album = album, AlbumArtist = albumArtist, TrackNumber = null, DiscNumber = null };
     }
 
     /// <summary>Meta for a track the user places into a chosen album.</summary>
     public static TrackMeta Place(TrackResult r, string album, string albumArtist)
     {
-        var basis = r.Meta ?? new TrackMeta(r.Title, r.Artist, album, albumArtist, null, null, null, null, null);
+        var basis = r.Meta ?? new TrackMeta(r.Title, r.CleanArtist, album, albumArtist, null, null, null, null, null);
         return basis with { Album = InputGuard.CleanText(album, 200, "Unknown"), AlbumArtist = InputGuard.CleanText(albumArtist, 200, "Unknown"), TrackNumber = null, DiscNumber = null };
     }
 }

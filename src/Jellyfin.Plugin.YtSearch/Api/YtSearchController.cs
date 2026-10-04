@@ -31,6 +31,45 @@ public class SearchRow
     public int Seconds { get; set; }
 }
 
+public class LibraryRow
+{
+    [System.Text.Json.Serialization.JsonPropertyName("name")]
+    public string Name { get; set; } = string.Empty;
+
+    [System.Text.Json.Serialization.JsonPropertyName("path")]
+    public string Path { get; set; } = string.Empty;
+
+    [System.Text.Json.Serialization.JsonPropertyName("writable")]
+    public bool Writable { get; set; }
+}
+
+public class CurrentLibraryRow
+{
+    [System.Text.Json.Serialization.JsonPropertyName("path")]
+    public string Path { get; set; } = string.Empty;
+
+    [System.Text.Json.Serialization.JsonPropertyName("exists")]
+    public bool Exists { get; set; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("writable")]
+    public bool Writable { get; set; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("libraryName")]
+    public string? LibraryName { get; set; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("usingDefault")]
+    public bool UsingDefault { get; set; }
+}
+
+public class LibraryInfo
+{
+    [System.Text.Json.Serialization.JsonPropertyName("current")]
+    public CurrentLibraryRow Current { get; set; } = new();
+
+    [System.Text.Json.Serialization.JsonPropertyName("libraries")]
+    public List<LibraryRow> Libraries { get; set; } = new();
+}
+
 public class AlbumRow
 {
     [System.Text.Json.Serialization.JsonPropertyName("id")]
@@ -101,6 +140,18 @@ public class YtSearchController : ControllerBase
         }).ToList());
     }
 
+    /// <summary>The music libraries downloads can go into, and the folder in use now (with whether Jellyfin can write there).</summary>
+    [HttpGet("Libraries")]
+    public ActionResult<LibraryInfo> GetLibraries()
+    {
+        var current = _library.CurrentLibrary();
+        return Ok(new LibraryInfo
+        {
+            Current = new CurrentLibraryRow { Path = current.Path, Exists = current.Exists, Writable = current.Writable, LibraryName = current.LibraryName, UsingDefault = current.UsingDefault },
+            Libraries = _library.MusicLibraries().Select(l => new LibraryRow { Name = l.Name, Path = l.Path, Writable = l.Writable }).ToList(),
+        });
+    }
+
     /// <summary>Albums the user can put a download into.</summary>
     [HttpGet("Albums")]
     public ActionResult<IReadOnlyList<AlbumRow>> GetAlbums() =>
@@ -127,7 +178,7 @@ public class YtSearchController : ControllerBase
                 return Ok(new AddResult { Ok = false, Message = "That album could not be found, or its folder is missing." });
             }
 
-            if (!CanWrite(target.Folder))
+            if (!LibraryService.CanWrite(target.Folder))
             {
                 return Ok(new AddResult { Ok = false, Message = "Jellyfin can't write to that album's folder (read-only?)." });
             }
@@ -152,21 +203,6 @@ public class YtSearchController : ControllerBase
         catch (DownloadException ex)
         {
             return Ok(new AddResult { Ok = false, Message = ex.Message });
-        }
-    }
-
-    private static bool CanWrite(string folder)
-    {
-        try
-        {
-            var probe = System.IO.Path.Combine(folder, "." + System.Guid.NewGuid().ToString("N") + ".tmp");
-            System.IO.File.WriteAllBytes(probe, System.Array.Empty<byte>());
-            System.IO.File.Delete(probe);
-            return true;
-        }
-        catch (System.Exception)
-        {
-            return false;
         }
     }
 

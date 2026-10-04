@@ -96,8 +96,14 @@ public class SearchAppendMiddleware
         if (HttpMethods.IsGet(req.Method) || HttpMethods.IsHead(req.Method))
         {
             var img = ImagePath.Match(path);
-            if (img.Success && Guid.TryParse(img.Groups[2].Value, out var imgId) && _search.TryResolve(imgId, out var imgResult)
-                && InputGuard.SafeThumbnailUrl(imgResult.ThumbnailUrl) is { } safeThumb && !_library.IsPromoted(imgResult.TrackId))
+            TrackResult? imgResult = null;
+            if (img.Success && Guid.TryParse(img.Groups[2].Value, out var imgId))
+            {
+                // A track or album of a search result, or one of its artists (shown with the track's cover).
+                imgResult = _search.TryResolve(imgId, out var resolved) ? resolved : _search.FindArtist(imgId)?.Track;
+            }
+
+            if (imgResult is not null && InputGuard.SafeThumbnailUrl(imgResult.ThumbnailUrl) is { } safeThumb && !_library.IsPromoted(imgResult.TrackId))
             {
                 // No login check, on purpose: Jellyfin serves artwork anonymously and apps fetch images without credentials.
                 // This only redirects to a public cover image of an allowlisted host, for ids we handed out ourselves.
@@ -110,7 +116,7 @@ public class SearchAppendMiddleware
             if (albumItem.Success && Guid.TryParse(albumItem.Groups[3].Value, out var albumId) && _search.TryResolve(albumId, out var albumTrack)
                 && albumTrack.Meta is not null && albumId == albumTrack.AlbumId && _library.GetItem(albumId) is null)
             {
-                if (!await IsAuthenticatedAsync(ctx))
+                if (!await IsAllowedAsync(ctx))
                 {
                     await _next(ctx);
                     return;
@@ -124,7 +130,7 @@ public class SearchAppendMiddleware
                 && _search.TryResolve(parentAlbum, out var parentTrack) && parentTrack.Meta is not null && parentAlbum == parentTrack.AlbumId
                 && _library.GetItem(parentAlbum) is null)
             {
-                if (!await IsAuthenticatedAsync(ctx))
+                if (!await IsAllowedAsync(ctx))
                 {
                     await _next(ctx);
                     return;
@@ -140,11 +146,25 @@ public class SearchAppendMiddleware
                 return;
             }
 
+            var artistItem = ItemPath.Match(path);
+            if (artistItem.Success && Guid.TryParse(artistItem.Groups[3].Value, out var artistPageId) && !_search.TryResolve(artistPageId, out _)
+                && _library.GetItem(artistPageId) is null && _search.FindArtist(artistPageId) is { } foundArtist)
+            {
+                if (!await IsAllowedAsync(ctx))
+                {
+                    await _next(ctx);
+                    return;
+                }
+
+                await WriteJsonAsync(ctx, Artist(foundArtist.Track, foundArtist.Name, _host.SystemId).ToJsonString());
+                return;
+            }
+
             var item = ItemPath.Match(path);
             if (item.Success && Guid.TryParse(item.Groups[3].Value, out var itemId) && _search.TryResolve(itemId, out var itemResult)
                 && itemId == itemResult.TrackId && !_library.IsPromoted(itemResult.TrackId))
             {
-                if (!await IsAuthenticatedAsync(ctx))
+                if (!await IsAllowedAsync(ctx))
                 {
                     await _next(ctx);
                     return;
@@ -165,12 +185,23 @@ public class SearchAppendMiddleware
             var isItems = ItemsPath.IsMatch(path);
             var isHints = !isItems && HintsPath.IsMatch(path);
             var term = InputGuard.CleanQuery(req.Query["searchTerm"].ToString());
-            if ((isItems || isHints) && term.Length >= 2 && WantsAudio(req)
-                && !(int.TryParse(req.Query["startIndex"], out var start) && start > 0)
-                && await IsAuthenticatedAsync(ctx))
+            var firstPage = !(int.TryParse(req.Query["startIndex"], out var start) && start > 0);
+            if ((isItems || isHints) && term.Length >= 2 && WantsAudio(req) && firstPage && await IsAllowedAsync(ctx))
             {
-                await AppendSearchAsync(ctx, path, term, isHints);
+                // Start the searches now so they run in parallel with Jellyfin's own search.
+                await AppendOnlineAsync(ctx, _search.SearchAsync(term, ctx.RequestAborted), isHints, term, $"Search '{term}'");
                 return;
+            }
+
+            // Opening an artist (songs of artistIds=...): add that artist's songs from the sites as well.
+            if (isItems && term.Length < 2 && WantsAudio(req) && firstPage && ArtistIdOf(req) is { } artistId)
+            {
+                var artistName = _library.ArtistName(artistId) ?? _search.FindArtist(artistId)?.Name;
+                if (!string.IsNullOrEmpty(artistName) && await IsAllowedAsync(ctx))
+                {
+                    await AppendOnlineAsync(ctx, _search.SearchArtistAsync(artistName, ctx.RequestAborted), false, artistName, $"Artist '{artistName}'");
+                    return;
+                }
             }
         }
 
@@ -234,7 +265,7 @@ public class SearchAppendMiddleware
         }
 
         // Downloading writes to disk, so it needs a logged-in user. Anyone else is passed on to Jellyfin, which answers 401.
-        if (!await IsAuthenticatedAsync(ctx))
+        if (!await IsAllowedAsync(ctx))
         {
             return true;
         }
@@ -256,14 +287,33 @@ public class SearchAppendMiddleware
         }
     }
 
-    private async Task AppendSearchAsync(HttpContext ctx, string path, string term, bool isHints)
-    {
-        var req = ctx.Request;
-        // Start the searches now so they run in parallel with Jellyfin's own search.
-        var ytTask = _search.SearchAsync(term, ctx.RequestAborted);
+    private static readonly string[] ArtistIdKeys = { "artistIds", "albumArtistIds", "contributingArtistIds" };
 
+    /// <summary>The artist an "Items" request is filtered by, if any.</summary>
+    private static Guid? ArtistIdOf(HttpRequest req)
+    {
+        foreach (var key in ArtistIdKeys)
+        {
+            foreach (var value in req.Query[key])
+            {
+                foreach (var part in (value ?? string.Empty).Split(',', '|'))
+                {
+                    if (Guid.TryParse(part, out var id))
+                    {
+                        return id;
+                    }
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>Lets Jellyfin answer, then adds the online results to the JSON (the searches were started before, in parallel).</summary>
+    private async Task AppendOnlineAsync(HttpContext ctx, Task<IReadOnlyList<TrackResult>> ytTask, bool isHints, string term, string label)
+    {
         // Prevent compressed responses so the body can be edited.
-        req.Headers.Remove("Accept-Encoding");
+        ctx.Request.Headers.Remove("Accept-Encoding");
         var original = ctx.Response.Body;
         await using var buffer = new MemoryStream();
         ctx.Response.Body = buffer;
@@ -288,7 +338,7 @@ public class SearchAppendMiddleware
                     bytes = edited;
                 }
 
-                _logger.LogInformation("Search '{Term}': appended {Count} of {Found} online results", term, edited is null ? 0 : yt.Count, yt.Count);
+                _logger.LogInformation("{Label}: appended {Count} of {Found} online results", label, edited is null ? 0 : yt.Count, yt.Count);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -306,12 +356,21 @@ public class SearchAppendMiddleware
         return ua.Length > 60 ? ua[..60] : ua;
     }
 
-    /// <summary>Our middleware runs before Jellyfin's own auth, so it must check the caller itself before doing any work.</summary>
-    private async Task<bool> IsAuthenticatedAsync(HttpContext ctx)
+    /// <summary>
+    /// Our middleware runs before Jellyfin's own auth, so it must check the caller itself before doing any work: signed in, and
+    /// (for a user, not an API key) allowed to use the library downloads go to.
+    /// </summary>
+    private async Task<bool> IsAllowedAsync(HttpContext ctx)
     {
         try
         {
-            return (await _auth.GetAuthorizationInfo(ctx).ConfigureAwait(false)).IsAuthenticated;
+            var info = await _auth.GetAuthorizationInfo(ctx).ConfigureAwait(false);
+            if (!info.IsAuthenticated)
+            {
+                return false;
+            }
+
+            return info.IsApiKey || (info.User is { } user && _library.UserCanUse(user));
         }
         catch (Exception)
         {
@@ -376,12 +435,26 @@ public class SearchAppendMiddleware
         ["Id"] = N(r.AlbumId),
         ["Type"] = "MusicAlbum",
         ["IsFolder"] = true,
-        ["AlbumArtist"] = r.DisplayAlbumArtist,
-        ["AlbumArtists"] = new JsonArray(new JsonObject { ["Name"] = r.DisplayAlbumArtist, ["Id"] = N(r.ArtistId) }),
-        ["ArtistItems"] = new JsonArray(new JsonObject { ["Name"] = r.DisplayAlbumArtist, ["Id"] = N(r.ArtistId) }),
+        ["AlbumArtist"] = r.PrimaryAlbumArtist,
+        ["AlbumArtists"] = new JsonArray(new JsonObject { ["Name"] = r.PrimaryAlbumArtist, ["Id"] = N(r.ArtistIdFor(r.PrimaryAlbumArtist)) }),
+        ["ArtistItems"] = new JsonArray(new JsonObject { ["Name"] = r.PrimaryAlbumArtist, ["Id"] = N(r.ArtistIdFor(r.PrimaryAlbumArtist)) }),
         ["ProductionYear"] = r.Meta.Year,
         ["ChildCount"] = Math.Max(1, tracks.Count),
         ["RunTimeTicks"] = tracks.Sum(t => t.RunTimeTicks),
+        ["ImageTags"] = new JsonObject { ["Primary"] = r.ImageTag },
+        ["BackdropImageTags"] = new JsonArray(),
+        ["CanDelete"] = false,
+        ["UserData"] = new JsonObject { ["PlaybackPositionTicks"] = 0, ["PlayCount"] = 0, ["IsFavorite"] = false, ["Played"] = false },
+    };
+
+    /// <summary>The page of an artist that is not in the library yet (its songs come from the sites).</summary>
+    internal static JsonObject Artist(TrackResult r, string name, string serverId) => new()
+    {
+        ["Name"] = name,
+        ["ServerId"] = serverId,
+        ["Id"] = N(r.ArtistIdFor(name)),
+        ["Type"] = "MusicArtist",
+        ["IsFolder"] = true,
         ["ImageTags"] = new JsonObject { ["Primary"] = r.ImageTag },
         ["BackdropImageTags"] = new JsonArray(),
         ["CanDelete"] = false,
@@ -406,10 +479,10 @@ public class SearchAppendMiddleware
             ["IsFolder"] = false,
             ["Type"] = "Audio",
             ["MediaType"] = "Audio",
-            ["Artists"] = new JsonArray(r.DisplayArtist),
-            ["ArtistItems"] = new JsonArray(new JsonObject { ["Name"] = r.DisplayArtist, ["Id"] = N(r.ArtistId) }),
-            ["AlbumArtist"] = r.DisplayAlbumArtist,
-            ["AlbumArtists"] = new JsonArray(new JsonObject { ["Name"] = r.DisplayAlbumArtist, ["Id"] = N(r.ArtistId) }),
+            ["Artists"] = new JsonArray(r.ArtistNames.Select(n => (JsonNode?)JsonValue.Create(n)).ToArray()),
+            ["ArtistItems"] = new JsonArray(r.ArtistNames.Select(n => (JsonNode?)new JsonObject { ["Name"] = n, ["Id"] = N(r.ArtistIdFor(n)) }).ToArray()),
+            ["AlbumArtist"] = r.PrimaryAlbumArtist,
+            ["AlbumArtists"] = new JsonArray(new JsonObject { ["Name"] = r.PrimaryAlbumArtist, ["Id"] = N(r.ArtistIdFor(r.PrimaryAlbumArtist)) }),
             ["ImageTags"] = new JsonObject { ["Primary"] = r.ImageTag },
             ["BackdropImageTags"] = new JsonArray(),
             ["LocationType"] = "FileSystem",
@@ -442,8 +515,8 @@ public class SearchAppendMiddleware
             ["MediaType"] = "Audio",
             ["IndexNumber"] = r.Meta?.TrackNumber,
             ["ProductionYear"] = r.Meta?.Year,
-            ["AlbumArtist"] = r.DisplayAlbumArtist,
-            ["Artists"] = new JsonArray(r.DisplayArtist),
+            ["AlbumArtist"] = r.PrimaryAlbumArtist,
+            ["Artists"] = new JsonArray(r.ArtistNames.Select(n => (JsonNode?)JsonValue.Create(n)).ToArray()),
         };
         if (r.Meta is { } m)
         {
