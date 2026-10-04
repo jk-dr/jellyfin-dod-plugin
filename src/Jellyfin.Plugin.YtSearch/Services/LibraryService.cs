@@ -27,7 +27,6 @@ namespace Jellyfin.Plugin.YtSearch.Services;
 /// </summary>
 public class LibraryService
 {
-    private const string LibraryName = "YouTube & SoundCloud";
 
     private static readonly Regex OurFileName = new("^(yt|sc)-[A-Za-z0-9_-]{1,20}\\.m4a$", RegexOptions.Compiled);
 
@@ -53,31 +52,55 @@ public class LibraryService
     // ... and system trees nothing may be written into.
     private static readonly string[] ForbiddenTrees = { "/etc", "/bin", "/sbin", "/usr", "/lib", "/lib32", "/lib64", "/proc", "/sys", "/dev", "/boot", "/root", "/run" };
 
-    private string DefaultRoot => Path.Combine(_paths.DataPath, "ytsearch", "library");
+    /// <summary>Name of the library older versions created on their own. It is never created now, and only chosen automatically as a last resort.</summary>
+    private const string LegacyLibraryName = "YouTube & SoundCloud";
 
-    /// <summary>The folder downloads go into: the library folder the user chose in the settings, else the plugin's own.</summary>
-    public string Root
+    private readonly object _autoLock = new();
+    private (DateTime At, string? Path) _auto;
+
+    /// <summary>
+    /// The folder downloads go into: the one chosen in the settings, else the first writable music library Jellyfin already
+    /// has. The plugin never creates a library; null when there is nothing to use.
+    /// </summary>
+    public string? TryRoot
     {
         get
         {
             var configured = Plugin.Instance?.Configuration.LibraryPath;
-            if (string.IsNullOrWhiteSpace(configured))
+            if (!string.IsNullOrWhiteSpace(configured))
             {
-                return DefaultRoot;
+                if (IsAcceptableRoot(configured))
+                {
+                    return configured.Trim().TrimEnd('/');
+                }
+
+                if (!_warnedAboutRoot)
+                {
+                    _warnedAboutRoot = true;
+                    _logger.LogWarning("The library folder '{Path}' in the settings is not usable (must be an absolute, non-system folder); using an existing music library instead", configured);
+                }
             }
 
-            if (IsAcceptableRoot(configured))
+            return AutoRoot();
+        }
+    }
+
+    /// <summary>Same, but throws a <see cref="DownloadException"/> that tells the user what to do when there is no library.</summary>
+    public string Root => TryRoot ?? throw new DownloadException("There is no music library to put downloads in. Add a music library in Jellyfin, or choose one in the plugin settings.");
+
+    /// <summary>The first writable music library (other libraries before the one old versions created), looked up at most once a minute.</summary>
+    private string? AutoRoot()
+    {
+        lock (_autoLock)
+        {
+            if (DateTime.UtcNow - _auto.At < TimeSpan.FromMinutes(1))
             {
-                return configured.Trim().TrimEnd('/');
+                return _auto.Path;
             }
 
-            if (!_warnedAboutRoot)
-            {
-                _warnedAboutRoot = true;
-                _logger.LogWarning("The library folder '{Path}' in the settings is not usable (must be an absolute, non-system folder); using the plugin's own library", configured);
-            }
-
-            return DefaultRoot;
+            var path = MusicLibraries().Where(l => l.Writable).OrderBy(l => l.Name == LegacyLibraryName).Select(l => l.Path).FirstOrDefault();
+            _auto = (DateTime.UtcNow, path);
+            return path;
         }
     }
 
@@ -142,7 +165,7 @@ public class LibraryService
     }
 
     /// <summary>True for files this plugin created (and so may delete): yt-*.m4a / sc-*.m4a inside the library folder.</summary>
-    public bool IsOurFile(string? path) => IsOurFile(Root, path);
+    public bool IsOurFile(string? path) => TryRoot is { } root && IsOurFile(root, path);
 
     internal static bool IsOurFile(string root, string? path)
     {
@@ -166,8 +189,8 @@ public class LibraryService
     /// <summary>Space used by the files this plugin downloaded (not the rest of a library the user may have pointed it at).</summary>
     public long LibrarySizeBytes()
     {
-        var root = Root;
-        return Directory.Exists(root)
+        var root = TryRoot;
+        return root is not null && Directory.Exists(root)
             ? new DirectoryInfo(root).EnumerateFiles("*.m4a", SearchOption.AllDirectories).Where(f => IsOurFile(root, f.FullName)).Sum(f => f.Length)
             : 0;
     }
@@ -279,20 +302,7 @@ public class LibraryService
                 }
             }
 
-            // Nothing known yet: only our own library can be created from scratch (a global scan once, it is otherwise empty).
-            var root = Root.TrimEnd('/');
-            if (!folder.TrimEnd('/').StartsWith(root, StringComparison.Ordinal))
-            {
-                throw new InvalidOperationException("That folder is not inside a Jellyfin library");
-            }
-
-            Directory.CreateDirectory(root);
-            if (LibraryContaining(root) is null)
-            {
-                _logger.LogInformation("Creating Jellyfin music library '{Name}' at {Root}", LibraryName, Root);
-                await _library.AddVirtualFolder(LibraryName, CollectionTypeOptions.music, NewLibraryOptions(Root), false).ConfigureAwait(false);
-            }
-
+            // Nothing known above the folder: the library is new or has never been scanned. Let Jellyfin scan its libraries once.
             await _library.ValidateMediaLibrary(new Progress<double>(), ct).ConfigureAwait(false);
         }
         finally
@@ -312,37 +322,11 @@ public class LibraryService
         }));
     }
 
-    /// <summary>Creates the music library if it does not exist yet (nothing happens when the chosen folder is already in a library).</summary>
-    public async Task EnsureLibraryAsync(CancellationToken ct)
-    {
-        await _scanLock.WaitAsync(ct).ConfigureAwait(false);
-        try
-        {
-            var root = Root.TrimEnd('/');
-            Directory.CreateDirectory(root);
-            var existed = LibraryContaining(root) is not null;
-            if (!existed)
-            {
-                _logger.LogInformation("Creating Jellyfin music library '{Name}' at {Root}", LibraryName, Root);
-                await _library.AddVirtualFolder(LibraryName, CollectionTypeOptions.music, NewLibraryOptions(Root), false).ConfigureAwait(false);
-            }
-
-            if (!existed || _library.FindByPath(root, true) is null)
-            {
-                await _library.ValidateMediaLibrary(new Progress<double>(), ct).ConfigureAwait(false);
-            }
-        }
-        finally
-        {
-            _scanLock.Release();
-        }
-    }
-
     /// <summary>
     /// Online results are only added for users who may use the library downloads go to: administrators, users with access
     /// to all libraries, and users with this library enabled. Disabled users never.
     /// </summary>
-    public bool UserCanUse(User user) => Allows(
+    public bool UserCanUse(User user) => TryRoot is not null && Allows(
         user.HasPermission(PermissionKind.IsAdministrator),
         user.HasPermission(PermissionKind.IsDisabled),
         user.HasPermission(PermissionKind.EnableAllFolders),
@@ -365,17 +349,22 @@ public class LibraryService
     }
 
     private Guid? OurLibraryId() =>
-        LibraryContaining(Root) is { } lib && Guid.TryParse(lib.ItemId, out var id) ? id : null;
+        TryRoot is { } root && LibraryContaining(root) is { } lib && Guid.TryParse(lib.ItemId, out var id) ? id : null;
 
     /// <summary>The name of an artist Jellyfin already knows.</summary>
     public string? ArtistName(Guid id) => _library.GetItemById(id) is MusicArtist artist ? artist.Name : null;
 
     /// <summary>Music libraries (and their folders) the downloads can go into, plus the one in use now.</summary>
-    public (string Path, bool Exists, bool Writable, string? LibraryName, bool UsingDefault) CurrentLibrary()
+    public (string? Path, bool Exists, bool Writable, string? LibraryName, bool Automatic) CurrentLibrary()
     {
-        var root = Root;
+        var root = TryRoot;
+        if (root is null)
+        {
+            return (null, false, false, null, true);
+        }
+
         var exists = Directory.Exists(root);
-        return (root, exists, exists && CanWrite(root), LibraryContaining(root)?.Name, string.IsNullOrWhiteSpace(Plugin.Instance?.Configuration.LibraryPath) || root == DefaultRoot);
+        return (root, exists, exists && CanWrite(root), LibraryContaining(root)?.Name, string.IsNullOrWhiteSpace(Plugin.Instance?.Configuration.LibraryPath));
     }
 
     public IReadOnlyList<(string Name, string Path, bool Writable)> MusicLibraries() =>
@@ -427,7 +416,12 @@ public class LibraryService
     /// </summary>
     public async Task PruneEmptyFoldersAsync(IEnumerable<string> folders, CancellationToken ct)
     {
-        var root = Root.TrimEnd('/');
+        if (TryRoot is not { } rootPath)
+        {
+            return;
+        }
+
+        var root = rootPath.TrimEnd('/');
         string? changedAbove = null;
         foreach (var start in folders.Distinct())
         {
@@ -460,15 +454,4 @@ public class LibraryService
             }
         }
     }
-
-    /// <summary>No internet lookups or sidecar files: the tags and cover art we wrote are the truth, and nothing is sent anywhere.</summary>
-    private static LibraryOptions NewLibraryOptions(string root) => new()
-    {
-        PathInfos = new[] { new MediaPathInfo(root) },
-        EnableInternetProviders = false,
-        SaveLocalMetadata = false,
-        EnableRealtimeMonitor = false,
-        AutomaticRefreshIntervalDays = 0,
-        MetadataSavers = Array.Empty<string>(),
-    };
 }

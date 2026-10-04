@@ -46,7 +46,7 @@ public class LibraryRow
 public class CurrentLibraryRow
 {
     [System.Text.Json.Serialization.JsonPropertyName("path")]
-    public string Path { get; set; } = string.Empty;
+    public string? Path { get; set; }
 
     [System.Text.Json.Serialization.JsonPropertyName("exists")]
     public bool Exists { get; set; }
@@ -57,8 +57,8 @@ public class CurrentLibraryRow
     [System.Text.Json.Serialization.JsonPropertyName("libraryName")]
     public string? LibraryName { get; set; }
 
-    [System.Text.Json.Serialization.JsonPropertyName("usingDefault")]
-    public bool UsingDefault { get; set; }
+    [System.Text.Json.Serialization.JsonPropertyName("automatic")]
+    public bool Automatic { get; set; }
 }
 
 public class LibraryInfo
@@ -147,7 +147,7 @@ public class YtSearchController : ControllerBase
         var current = _library.CurrentLibrary();
         return Ok(new LibraryInfo
         {
-            Current = new CurrentLibraryRow { Path = current.Path, Exists = current.Exists, Writable = current.Writable, LibraryName = current.LibraryName, UsingDefault = current.UsingDefault },
+            Current = new CurrentLibraryRow { Path = current.Path, Exists = current.Exists, Writable = current.Writable, LibraryName = current.LibraryName, Automatic = current.Automatic },
             Libraries = _library.MusicLibraries().Select(l => new LibraryRow { Name = l.Name, Path = l.Path, Writable = l.Writable }).ToList(),
         });
     }

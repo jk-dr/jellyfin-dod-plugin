@@ -27,8 +27,9 @@ Appends YouTube and SoundCloud results to Jellyfin's standard search API (`/Item
 - **yt-dlp:** the plugin downloads its own nightly binary (checksum-verified) and updates it every 12 hours.
 - **Cookies:** upload a Netscape `cookies.txt` on the plugin settings page (age-restricted / bot-check videos);
   the Refresh button checks that they still work. Cookies are only sent to YouTube.
-- **Choosing the library:** on the settings page, pick which music library downloads go into: the plugin's own
-  (created automatically, also at startup), one of your existing music libraries, or any other folder. They are
+- **Choosing the library:** on the settings page, pick which of your existing music libraries
+  downloads go into (or another folder inside one). The plugin never creates a library: with nothing chosen it uses
+  the first writable music library Jellyfin has, and with none it shows no online results. Songs are
   saved as `Artist/Album/` folders in it. Cleanup only ever deletes files the plugin created (`yt-*.m4a`,
   `sc-*.m4a`) and only the folders those left empty; the size limit counts only those files, and metadata of
   albums/artists you already have is never overwritten. System folders (`/`, `/etc`, `/usr`, ...) are refused.

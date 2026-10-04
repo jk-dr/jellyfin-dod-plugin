@@ -101,11 +101,11 @@
                     <div class="selectContainer">
                         <label class="selectLabel" for="libSel">Library downloads go into</label>
                         <select id="libSel" is="emby-select">
-                            <option value="">The plugin's own library (created automatically)</option>
+                            <option value="">Automatic: the first writable music library Jellyfin already has</option>
                             <option value="__custom">Another folder...</option>
                         </select>
                         <div class="fieldDescription">
-                            Pick one of your music libraries and songs are saved into it as Artist/Album folders, so they sit with your own music.
+                            The plugin never creates a library. Pick one of your music libraries and songs are saved into it as Artist/Album folders, so they sit with your own music.
                             Only files this plugin created (yt-*.m4a and sc-*.m4a) are ever deleted by the cleanup, and the size limit counts only those.
                             Changing it affects new downloads; songs already downloaded stay where they are.
                         </div>
@@ -388,7 +388,11 @@
                     else { sel.value = '__custom'; $('libCustom').value = configuredPath; }
                     $('libCustomBox').style.display = sel.value === '__custom' ? 'block' : 'none';
                     var c = info.current;
-                    var text = 'In use now: ' + c.path + (c.libraryName ? ' (library "' + c.libraryName + '")' : '');
+                    if (!c.path) {
+                        $('libStatus').textContent = '\u26A0 No writable music library found. Add a music library in Jellyfin (Dashboard > Libraries), or choose a folder above. Until then no YouTube/SoundCloud results are shown.';
+                        return;
+                    }
+                    var text = 'In use now: ' + c.path + (c.libraryName ? ' (library "' + c.libraryName + '")' : '') + (c.automatic ? ' \u2014 chosen automatically' : '');
                     if (!c.exists) { text += ' \u2014 \u26A0 the folder does not exist yet; it is created on the first download'; }
                     else if (!c.writable) { text += ' \u2014 \u26A0 Jellyfin cannot write to it, downloads will fail. Check the folder permissions or the container mount (read-only?).'; }
                     else { text += ' \u2014 writable \u2714'; }
