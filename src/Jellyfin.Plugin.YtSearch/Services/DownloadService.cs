@@ -18,17 +18,19 @@ public class DownloadService
     private readonly LibraryService _library;
     private readonly CleanupService _cleanup;
     private readonly AudioTagger _tagger;
+    private readonly LyricsClient _lyrics;
     private readonly FailureLog _failures;
     private readonly IApplicationPaths _paths;
     private readonly ILogger<DownloadService> _logger;
     private readonly ConcurrentDictionary<Guid, Task> _inFlight = new();
 
-    public DownloadService(YtDlpService ytdlp, LibraryService library, CleanupService cleanup, AudioTagger tagger, FailureLog failures, IApplicationPaths paths, ILogger<DownloadService> logger)
+    public DownloadService(YtDlpService ytdlp, LibraryService library, CleanupService cleanup, AudioTagger tagger, LyricsClient lyrics, FailureLog failures, IApplicationPaths paths, ILogger<DownloadService> logger)
     {
         _ytdlp = ytdlp;
         _library = library;
         _cleanup = cleanup;
         _tagger = tagger;
+        _lyrics = lyrics;
         _failures = failures;
         _paths = paths;
         _logger = logger;
@@ -84,9 +86,11 @@ public class DownloadService
             var timeout = TimeSpan.FromSeconds(Math.Max(Plugin.Instance?.Configuration.DownloadTimeoutSeconds ?? 300, 10));
             using var cts = new CancellationTokenSource(timeout);
             _logger.LogInformation("Downloading {Source} '{Title}' ({Id})", track.Source, track.Title, track.SourceId);
+            var lyricsTask = _lyrics.FetchAsync(track, cts.Token); // runs while the audio downloads
             var file = await _ytdlp.DownloadAsync(track, tmp, cts.Token).ConfigureAwait(false);
             var tagged = await _tagger.TagAsync(file, track, tmp, cts.Token).ConfigureAwait(false);
-            await _library.PromoteAsync(track, tagged, CancellationToken.None).ConfigureAwait(false);
+            var sidecar = LyricsClient.ForSidecar(await lyricsTask.ConfigureAwait(false));
+            await _library.PromoteAsync(track, tagged, CancellationToken.None, sidecar).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {

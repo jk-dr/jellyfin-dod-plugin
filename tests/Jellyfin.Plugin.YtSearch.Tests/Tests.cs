@@ -787,4 +787,46 @@ public class LibraryChoiceTests
     [InlineData("/media/music", "/media/music/Artist/yt-dQw4w9WgXcQ.mp3", false)]
     public void CleanupOnlyEverTouchesFilesThePluginCreatedInTheChosenLibrary(string root, string path, bool ours) =>
         Assert.Equal(ours, Jellyfin.Plugin.YtSearch.Services.LibraryService.IsOurFile(root, path));
+
+    private const string Ebur = "[Parsed_ebur128_0 @ 0x1] Summary:\n\n  Integrated loudness:\n    I:         -21.8 LUFS\n    Threshold: -31.8 LUFS\n\n  Loudness range:\n    LRA:         0.0 LU\n\n  True peak:\n    Peak:      -14.5 dBFS\n";
+
+    [Fact]
+    public void LoudnessIsReadFromTheEbur128SummaryAndBecomesReplayGain()
+    {
+        var l = AudioTagger.ParseLoudness("t: 0.1 M: -20 S: -20 I: -5.0 LUFS LRA: 0.0 LU\n" + Ebur);
+        Assert.NotNull(l);
+        Assert.Equal(-21.8, l!.Lufs);
+        var tags = AudioTagger.ReplayGainTags(l).ToDictionary(t => t.Key, t => t.Value);
+        Assert.Equal("+3.80 dB", tags["REPLAYGAIN_TRACK_GAIN"]);
+        Assert.Equal("0.188365", tags["REPLAYGAIN_TRACK_PEAK"]);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("no summary here")]
+    [InlineData("Summary:\n  Integrated loudness:\n    I:         -inf LUFS\n  True peak:\n    Peak:      -inf dBFS\n")]
+    public void SilenceOrGarbageGivesNoReplayGain(string log)
+    {
+        Assert.Null(AudioTagger.ParseLoudness(log));
+        Assert.Empty(AudioTagger.ReplayGainTags(null));
+    }
+
+    [Fact]
+    public void LyricsPreferTimedOverPlainAndSkipInstrumentals()
+    {
+        var timed = LyricsClient.ParseOne("{\"plainLyrics\":\"a\",\"syncedLyrics\":\"[00:01.00] a\"}");
+        Assert.Equal((".lrc", "[00:01.00] a"), LyricsClient.ForSidecar(timed));
+        Assert.Equal((".txt", "a"), LyricsClient.ForSidecar(LyricsClient.ParseOne("{\"plainLyrics\":\"a\",\"syncedLyrics\":null}")));
+        Assert.Null(LyricsClient.ParseOne("{\"instrumental\":true,\"plainLyrics\":\"a\"}"));
+        Assert.Null(LyricsClient.ParseOne("not json".Length > 0 ? "" : null));
+        Assert.Null(LyricsClient.ForSidecar(null));
+    }
+
+    [Fact]
+    public void LyricsSearchPicksTheClosestLengthWithinFiveSecondsPreferringTimed()
+    {
+        const string json = "[{\"duration\":200,\"plainLyrics\":\"far\"},{\"duration\":181,\"plainLyrics\":\"plain\"},{\"duration\":183,\"syncedLyrics\":\"[00:01.00] timed\"}]";
+        Assert.Equal("[00:01.00] timed", LyricsClient.PickBest(json, 180)!.Synced);
+        Assert.Null(LyricsClient.PickBest("[{\"duration\":200,\"plainLyrics\":\"far\"}]", 180));
+    }
 }

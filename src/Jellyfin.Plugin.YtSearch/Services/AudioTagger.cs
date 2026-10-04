@@ -2,7 +2,10 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
+using System.Globalization;
 using System.Net.Http;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using MediaBrowser.Controller.MediaEncoding;
@@ -33,7 +36,10 @@ public class AudioTagger
         var output = Path.Combine(workDir, "tagged.m4a");
         try
         {
-            var cover = await PrepareCoverAsync(track, workDir, ct).ConfigureAwait(false);
+            var coverTask = PrepareCoverAsync(track, workDir, ct);
+            var loudnessTask = Plugin.Instance?.Configuration.NormalizeAudio ?? true ? MeasureLoudnessAsync(input, ct) : Task.FromResult<Loudness?>(null);
+            var cover = await coverTask.ConfigureAwait(false);
+            var loudness = await loudnessTask.ConfigureAwait(false);
             var args = new List<string> { "-y", "-loglevel", "error", "-i", input };
             if (cover is not null)
             {
@@ -46,8 +52,8 @@ public class AudioTagger
                 args.AddRange(new[] { "-map", "1:v:0", "-disposition:v:0", "attached_pic" });
             }
 
-            args.AddRange(new[] { "-c", "copy", "-map_metadata", "-1", "-movflags", "+faststart" });
-            foreach (var (key, value) in Tags(track))
+            args.AddRange(new[] { "-c", "copy", "-map_metadata", "-1", "-movflags", "+faststart+use_metadata_tags" });
+            foreach (var (key, value) in Tags(track).Concat(ReplayGainTags(loudness)))
             {
                 args.Add("-metadata");
                 args.Add($"{key}={value}");
@@ -62,6 +68,66 @@ public class AudioTagger
             _logger.LogWarning("Tagging {Id} failed ({Message}); using the untagged file", track.SourceId, ex.Message);
             return input;
         }
+    }
+
+    /// <summary>Measured loudness: integrated LUFS and true peak in dBTP.</summary>
+    internal record Loudness(double Lufs, double TruePeakDb);
+
+    /// <summary>ReplayGain 2.0 reference level.</summary>
+    private const double ReferenceLufs = -18.0;
+
+    /// <summary>One fast analysis pass (no output file); null when it fails, so the song is simply left alone.</summary>
+    private async Task<Loudness?> MeasureLoudnessAsync(string input, CancellationToken ct)
+    {
+        try
+        {
+            var log = await RunFfmpegAsync(
+                new[] { "-hide_banner", "-nostats", "-loglevel", "info", "-i", input, "-map", "0:a:0", "-af", "ebur128=peak=true", "-f", "null", "-" },
+                ct, TimeSpan.FromSeconds(40)).ConfigureAwait(false);
+            return ParseLoudness(log);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or OperationCanceledException && !ct.IsCancellationRequested)
+        {
+            _logger.LogInformation("Loudness measurement failed: {Message}", ex.Message);
+            return null;
+        }
+    }
+
+    private static readonly Regex SummaryLufs = new(@"Integrated loudness:\s+I:\s+(-?\d+(?:\.\d+)?) LUFS", RegexOptions.Compiled);
+    private static readonly Regex SummaryPeak = new(@"True peak:\s+Peak:\s+(-?\d+(?:\.\d+)?) dBFS", RegexOptions.Compiled);
+
+    /// <summary>Reads the summary the ebur128 filter prints at the end of ffmpeg's log (silence prints "-inf" and gives null).</summary>
+    internal static Loudness? ParseLoudness(string log)
+    {
+        var summary = log.LastIndexOf("Summary:", StringComparison.Ordinal);
+        if (summary < 0)
+        {
+            return null;
+        }
+
+        var text = log[summary..];
+        if (SummaryLufs.Match(text) is not { Success: true } i || SummaryPeak.Match(text) is not { Success: true } p
+            || !double.TryParse(i.Groups[1].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var lufs)
+            || !double.TryParse(p.Groups[1].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var peak)
+            || lufs < -70 || lufs > 0)
+        {
+            return null;
+        }
+
+        return new Loudness(lufs, peak);
+    }
+
+    internal static IEnumerable<(string Key, string Value)> ReplayGainTags(Loudness? l)
+    {
+        if (l is null)
+        {
+            yield break;
+        }
+
+        var gain = Math.Clamp(ReferenceLufs - l.Lufs, -30, 30);
+        yield return ("REPLAYGAIN_TRACK_GAIN", gain.ToString("+0.00;-0.00;+0.00", CultureInfo.InvariantCulture) + " dB");
+        yield return ("REPLAYGAIN_TRACK_PEAK", Math.Pow(10, l.TruePeakDb / 20).ToString("0.000000", CultureInfo.InvariantCulture));
+        yield return ("REPLAYGAIN_REFERENCE_LOUDNESS", "-18.00 LUFS");
     }
 
     internal static IEnumerable<(string Key, string Value)> Tags(TrackResult track)
@@ -146,7 +212,7 @@ public class AudioTagger
         }
     }
 
-    private async Task RunFfmpegAsync(IEnumerable<string> args, CancellationToken ct)
+    private async Task<string> RunFfmpegAsync(IEnumerable<string> args, CancellationToken ct, TimeSpan? timeout = null)
     {
         var psi = new ProcessStartInfo(string.IsNullOrEmpty(_encoder.EncoderPath) ? "ffmpeg" : _encoder.EncoderPath)
         {
@@ -161,7 +227,7 @@ public class AudioTagger
 
         using var proc = Process.Start(psi) ?? throw new InvalidOperationException("Could not start ffmpeg");
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        cts.CancelAfter(TimeSpan.FromSeconds(90));
+        cts.CancelAfter(timeout ?? TimeSpan.FromSeconds(90));
         var err = proc.StandardError.ReadToEndAsync(cts.Token);
         _ = proc.StandardOutput.ReadToEndAsync(cts.Token);
         try
@@ -174,10 +240,12 @@ public class AudioTagger
             throw;
         }
 
+        var text = (await err.ConfigureAwait(false)).Trim();
         if (proc.ExitCode != 0)
         {
-            var text = (await err.ConfigureAwait(false)).Trim();
             throw new InvalidOperationException("ffmpeg failed: " + (text.Length > 200 ? text[..200] : text));
         }
+
+        return text;
     }
 }

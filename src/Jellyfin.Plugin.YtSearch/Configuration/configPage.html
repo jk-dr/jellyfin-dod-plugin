@@ -133,6 +133,18 @@
                     </div>
                     <div class="checkboxContainer checkboxContainer-withDescription">
                         <label>
+                            <input id="normEnabled" type="checkbox" is="emby-checkbox" />
+                            <span>Level the volume of downloads (stores ReplayGain tags; the audio is not re-encoded)</span>
+                        </label>
+                    </div>
+                    <div class="checkboxContainer checkboxContainer-withDescription">
+                        <label>
+                            <input id="lyrEnabled" type="checkbox" is="emby-checkbox" />
+                            <span>Fetch timed lyrics from lrclib.net for downloads (the artist, title and length are sent to that site)</span>
+                        </label>
+                    </div>
+                    <div class="checkboxContainer checkboxContainer-withDescription">
+                        <label>
                             <input id="scHideDrm" type="checkbox" is="emby-checkbox" />
                             <span>Hide SoundCloud tracks that can't be downloaded (DRM / 30-second previews)</span>
                         </label>
@@ -258,6 +270,8 @@
                     $('clEnabled').checked = c.EnableCleanup !== false;
                     $('dbgAll').checked = c.LogAllApiRequests === true;
                     $('scHideDrm').checked = c.HideUnplayableSoundCloud !== false;
+                    $('normEnabled').checked = c.NormalizeAudio !== false;
+                    $('lyrEnabled').checked = c.FetchLyrics !== false;
                     $('albumMode').value = c.AlbumMode || 'auto';
                     loadLibraries(c.LibraryPath || '');
                     $('albumName').value = c.FixedAlbumName || '';
@@ -318,6 +332,8 @@
                     c.EnableCleanup = $('clEnabled').checked;
                     c.LogAllApiRequests = $('dbgAll').checked;
                     c.HideUnplayableSoundCloud = $('scHideDrm').checked;
+                    c.NormalizeAudio = $('normEnabled').checked;
+                    c.FetchLyrics = $('lyrEnabled').checked;
                     c.LibraryPath = $('libSel').value === '__custom' ? $('libCustom').value.trim() : $('libSel').value;
                     c.AlbumMode = $('albumMode').value;
                     c.FixedAlbumName = $('albumName').value.trim() || 'YouTube & SoundCloud';

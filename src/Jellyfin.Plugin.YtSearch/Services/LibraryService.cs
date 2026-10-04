@@ -178,13 +178,18 @@ public class LibraryService
     public bool IsPromoted(Guid id) => GetItem(id) is { Path: { Length: > 0 } p } && File.Exists(p);
 
     /// <summary>Moves the tagged file into place and has Jellyfin index it.</summary>
-    public async Task PromoteAsync(TrackResult r, string taggedFile, CancellationToken ct)
+    public async Task PromoteAsync(TrackResult r, string taggedFile, CancellationToken ct, (string Extension, string Content)? lyrics = null)
     {
         var path = PathFor(r);
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
             File.Move(taggedFile, path, true);
+            if (lyrics is { } l)
+            {
+                // Jellyfin reads lyrics from a file with the song's name; it must be there before the scan.
+                File.WriteAllText(Path.ChangeExtension(path, l.Extension), l.Content);
+            }
         }
         catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
         {
@@ -443,8 +448,18 @@ public class LibraryService
     }
 
     /// <summary>Deletes the item and its file.</summary>
-    public void Delete(BaseItem item) =>
+    public void Delete(BaseItem item)
+    {
+        var path = item.Path;
         _library.DeleteItem(item, new DeleteOptions { DeleteFileLocation = true });
+        if (IsOurFile(path))
+        {
+            foreach (var ext in new[] { ".lrc", ".txt" })
+            {
+                try { File.Delete(Path.ChangeExtension(path, ext)); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+            }
+        }
+    }
 
     /// <summary>No internet lookups or sidecar files: the tags and cover art we wrote are the truth, and nothing is sent anywhere.</summary>
     private static LibraryOptions NewLibraryOptions(string root) => new()

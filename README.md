@@ -8,6 +8,13 @@ Appends YouTube and SoundCloud results to Jellyfin's standard search API (`/Item
 - **Search:** YouTube and SoundCloud are queried directly over HTTP (about 0.5 s; yt-dlp is the automatic fallback),
   merged and ranked by relevance to what you typed, and appended to the JSON of `/Items?searchTerm=` and
   `/Search/Hints`. Result ids are the ids Jellyfin will give the files, so they never change.
+- **Volume levelling:** each download is measured with ffmpeg (about 2-3 s for a 4-minute song) and the result is
+  stored as ReplayGain tags (`REPLAYGAIN_TRACK_GAIN`, reference -18 LUFS). The audio is never re-encoded. Players
+  that apply ReplayGain or Jellyfin's normalisation level the songs. Setting: "Level the volume of downloads".
+- **Timed lyrics:** while the audio downloads, the song is looked up on lrclib.net (artist, title, album and length
+  are sent there; 6 s limit, failures are ignored). Timed lyrics are saved as `yt-ID.lrc` (or `.txt` when only
+  plain lyrics exist) next to the song, where Jellyfin reads them. Cleanup deletes them with the song. Setting:
+  "Fetch timed lyrics".
 - **Real albums:** each result is matched against Apple's iTunes Search (no key) for its real album, track number,
   year and cover. Only confident matches get an album (no remixes, covers or live versions); the rest are loose tracks.
 - **First use:** when a client plays, downloads, favorites or adds a result to a playlist, the plugin downloads the

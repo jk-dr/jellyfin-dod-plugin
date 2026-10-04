@@ -47,6 +47,12 @@ public class PluginConfiguration : BasePluginConfiguration
     /// <summary>Look up the real album, track number, year and cover art of songs (Apple iTunes Search, no key).</summary>
     public bool LookUpAlbums { get; set; } = true;
 
+    /// <summary>Measure each download's loudness and store it as ReplayGain tags, so players can level songs (no re-encoding).</summary>
+    public bool NormalizeAudio { get; set; } = true;
+
+    /// <summary>Fetch timed lyrics from lrclib.net (artist, title and length are sent there) and save them next to the song.</summary>
+    public bool FetchLyrics { get; set; } = true;
+
     public bool EnableSoundCloud { get; set; } = true;
 
     public int SoundCloudMaxResults { get; set; } = 10;
