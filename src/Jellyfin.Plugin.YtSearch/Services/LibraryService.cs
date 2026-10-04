@@ -138,7 +138,7 @@ public class LibraryService
         // Artist and album folders are created when the song is added: Root/Artist/Album/yt-ID.m4a.
         var path = r.Meta is { } m
             ? Path.Combine(root, InputGuard.SafeFolderName(r.PrimaryAlbumArtist, 80), InputGuard.SafeFolderName(m.Album, 100), name)
-            : Path.Combine(root, InputGuard.SafeFolderName(r.CleanArtist, 80), InputGuard.SafeFolderName(r.Title + " - Single", 100), name);
+            : Path.Combine(root, InputGuard.SafeFolderName(r.CleanArtist, 80), InputGuard.SafeFolderName(r.Title, 100), name);
 
         // Whatever the metadata said, the file must end up inside the library folder.
         if (!Path.GetFullPath(path).StartsWith(root + "/", StringComparison.Ordinal))

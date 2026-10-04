@@ -502,10 +502,10 @@ public class AlbumPolicyTests
     }
 
     [Fact]
-    public void SongsWithoutAnAlbumGetTheirOwnSingleUnderTheirArtist()
+    public void SongsWithoutAnAlbumGetAnAlbumNamedAfterTheSong()
     {
         var m = Jellyfin.Plugin.YtSearch.Services.AlbumPolicy.For(T(), null);
-        Assert.Equal("Some Song (Official) - Single", m.Album);
+        Assert.Equal("Some Song (Official)", m.Album);
         Assert.Equal("Some Channel", m.Artist);
         Assert.Equal("Some Channel", m.AlbumArtist);
         Assert.Equal("Some Song (Official)", m.Title);

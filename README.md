@@ -16,7 +16,7 @@ Appends YouTube and SoundCloud results to Jellyfin's standard search API (`/Item
   plain lyrics exist) next to the song, where Jellyfin reads them. Cleanup deletes them with the song. Setting:
   "Fetch timed lyrics".
 - **Real albums:** each result is matched against Apple's iTunes Search (no key) for its real album, track number,
-  year and cover. Only confident matches get an album (no remixes, covers or live versions); the rest become a single under their artist.
+  year and cover. Only confident matches get an album (no remixes, covers or live versions); the rest become an album named after the song under their artist.
 - **First use:** when a client plays, downloads, favorites or adds a result to a playlist, the plugin downloads the
   m4a, writes the tags and cover into it with ffmpeg stream copy (no re-encoding), files it as
   `Artist/Album/yt-ID.m4a`, and has Jellyfin's own scanner index it. Albums, artists, artwork
@@ -39,7 +39,7 @@ Appends YouTube and SoundCloud results to Jellyfin's standard search API (`/Item
 - **Artists:** several artists in a credit ("A, B & C") each get their own artist; " - Topic" is dropped from channel
   names. Opening an artist adds that artist's songs from the sites; artists of search results have a page too.
 - **Artist and album folders:** every song is filed as `Artist/Album/yt-ID.m4a` inside the library, and the folders are
-  created when the song is added. A song with no known album gets its own single (`Title - Single`) under its artist.
+  created when the song is added. A song with no known album gets its own album named after the song (`Title`) under its artist.
   There is no "one album for everything" mode.
 - **Find and add:** the settings page can search and add a song directly, for apps that only search a synced copy
   of the library (e.g. Manet) and so never ask the server.
