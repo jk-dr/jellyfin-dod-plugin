@@ -22,9 +22,6 @@ public sealed record TrackResult(string Source, string SourceId, string Title, s
     private readonly Guid? _trackId;
     private readonly Guid? _albumId;
 
-    /// <summary>When set, the file goes into this existing folder (an album the user picked) instead of Root/Artist/Album.</summary>
-    public string? FolderOverride { get; init; }
-
     /// <summary>Catalog metadata when a confident match was found.</summary>
     public TrackMeta? Meta { get; init; }
 

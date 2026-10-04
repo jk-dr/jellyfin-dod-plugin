@@ -1,29 +1,21 @@
 namespace Jellyfin.Plugin.YtSearch.Services;
 
-/// <summary>Applies the user's "where do downloads go" setting to a track's album metadata.</summary>
+/// <summary>Makes sure every track gets an artist and an album, so it is filed as Artist/Album/ like any other song in a library.</summary>
 public static class AlbumPolicy
 {
     /// <summary>
-    /// In "fixed" mode every track goes into one album the user named (artist and title stay per track);
-    /// otherwise the catalog match (or none) is kept as is.
+    /// The catalog match when there is one. Otherwise a single named after the song ("Title - Single") by the track's artist,
+    /// so even songs with no known album get their own artist and album folders instead of sitting loose in the library.
     /// </summary>
-    public static TrackMeta? Apply(string? mode, string? fixedAlbum, string? fixedAlbumArtist, TrackResult r, TrackMeta? catalog)
+    public static TrackMeta For(TrackResult r, TrackMeta? catalog)
     {
-        if (mode != "fixed")
+        if (catalog is not null)
         {
             return catalog;
         }
 
-        var album = InputGuard.CleanText(fixedAlbum, 200, "YouTube & SoundCloud");
-        var albumArtist = InputGuard.CleanText(fixedAlbumArtist, 200, "Various Artists");
-        var basis = catalog ?? new TrackMeta(r.Title, r.CleanArtist, album, albumArtist, null, null, null, null, null);
-        return basis with { Album = album, AlbumArtist = albumArtist, TrackNumber = null, DiscNumber = null };
-    }
-
-    /// <summary>Meta for a track the user places into a chosen album.</summary>
-    public static TrackMeta Place(TrackResult r, string album, string albumArtist)
-    {
-        var basis = r.Meta ?? new TrackMeta(r.Title, r.CleanArtist, album, albumArtist, null, null, null, null, null);
-        return basis with { Album = InputGuard.CleanText(album, 200, "Unknown"), AlbumArtist = InputGuard.CleanText(albumArtist, 200, "Unknown"), TrackNumber = null, DiscNumber = null };
+        var title = InputGuard.CleanText(r.Title, 200, "Unknown");
+        var artist = InputGuard.CleanText(r.CleanArtist, 200, "Unknown Artist");
+        return new TrackMeta(title, artist, InputGuard.CleanText(title + " - Single", 200, "Singles"), artist, null, null, null, null, null);
     }
 }

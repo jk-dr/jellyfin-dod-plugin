@@ -135,15 +135,10 @@ public class LibraryService
 
         var root = Root.TrimEnd('/');
         var name = (r.Source == Sources.SoundCloud ? "sc-" : "yt-") + r.SourceId + ".m4a";
-        if (r.FolderOverride is { Length: > 0 } folder)
-        {
-            // An album folder the user picked (checked when it was chosen: an existing Jellyfin album).
-            return Path.Combine(folder.TrimEnd('/'), name);
-        }
-
+        // Artist and album folders are created when the song is added: Root/Artist/Album/yt-ID.m4a.
         var path = r.Meta is { } m
             ? Path.Combine(root, InputGuard.SafeFolderName(r.PrimaryAlbumArtist, 80), InputGuard.SafeFolderName(m.Album, 100), name)
-            : Path.Combine(root, name);
+            : Path.Combine(root, InputGuard.SafeFolderName(r.CleanArtist, 80), InputGuard.SafeFolderName(r.Title + " - Single", 100), name);
 
         // Whatever the metadata said, the file must end up inside the library folder.
         if (!Path.GetFullPath(path).StartsWith(root + "/", StringComparison.Ordinal))
@@ -388,26 +383,6 @@ public class LibraryService
         {
             return false;
         }
-    }
-
-    /// <summary>Every album Jellyfin knows, for the "put it in this album" picker.</summary>
-    public IReadOnlyList<(Guid Id, string Name, string Artist)> ListAlbums() =>
-        _library.GetItemList(new InternalItemsQuery { IncludeItemTypes = new[] { Jellyfin.Data.Enums.BaseItemKind.MusicAlbum }, Recursive = true })
-            .OfType<MusicAlbum>()
-            .Select(a => (a.Id, a.Name, a.AlbumArtists.FirstOrDefault() ?? string.Empty))
-            .OrderBy(a => a.Name, StringComparer.CurrentCultureIgnoreCase)
-            .Take(3000)
-            .ToList();
-
-    /// <summary>The folder of an existing album, if it is a real, writable directory.</summary>
-    public (string Name, string Artist, string Folder)? ResolveAlbumFolder(Guid albumId)
-    {
-        if (_library.GetItemById(albumId) is not MusicAlbum album || string.IsNullOrEmpty(album.Path) || !Directory.Exists(album.Path))
-        {
-            return null;
-        }
-
-        return (album.Name, album.AlbumArtists.FirstOrDefault() ?? string.Empty, album.Path.TrimEnd('/'));
     }
 
     /// <summary>

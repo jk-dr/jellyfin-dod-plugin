@@ -39,9 +39,6 @@ public class SearchService
 
     public IReadOnlyList<TrackResult> TracksOfAlbum(Guid albumId) => _registry.TracksOfAlbum(albumId);
 
-    /// <summary>Records where the user chose to put a track, so later searches and plays use that placement.</summary>
-    public void Replace(TrackResult placed) => _registry.Replace(placed);
-
     /// <summary>Searches every enabled source in parallel; results come back ordered by relevance, with album metadata where known.</summary>
     public async Task<IReadOnlyList<TrackResult>> SearchAsync(string query, CancellationToken ct, int? perSource = null)
     {
@@ -66,13 +63,12 @@ public class SearchService
         var ranked = RelevanceRanker.Rank(query, raw);
         var meta = await _catalog.GetMetaAsync(query, ranked, ct).ConfigureAwait(false);
 
-        // A track keeps the album (and so the id) it was first given; new ones get the catalog match, or the user's fixed album.
+        // A track keeps the album (and so the id) it was first given; new ones get the catalog match, or a single named after the song.
         // Songs matched to a standard release are the canonical copy, so they go first (stable: relevance order is otherwise kept).
-        var cfg2 = Plugin.Instance?.Configuration;
         var canonical = new HashSet<string>();
         var finals = ranked.Select(r =>
         {
-            if (_registry.TryGetBySource(r.Source, r.SourceId, out var known))
+            if (_registry.TryGetBySource(r.Source, r.SourceId, out var known) && (known.Meta is not null || _library.IsPromoted(known.TrackId)))
             {
                 return known;
             }
@@ -83,8 +79,7 @@ public class SearchService
                 canonical.Add(r.Key);
             }
 
-            var chosen = AlbumPolicy.Apply(cfg2?.AlbumMode, cfg2?.FixedAlbumName, cfg2?.FixedAlbumArtist, r, catalog);
-            return _library.WithId(chosen is null ? r : r with { Meta = chosen, ThumbnailUrl = catalog?.ArtworkUrl ?? r.ThumbnailUrl });
+            return _library.WithId(r with { Meta = AlbumPolicy.For(r, catalog), ThumbnailUrl = catalog?.ArtworkUrl ?? r.ThumbnailUrl });
         }).OrderBy(r => canonical.Contains(r.Key) ? 0 : 1).ToList();
         var shown = DedupeAcrossSources(finals, r => _library.IsPromoted(r.TrackId));
         if (shown.Count < finals.Count)

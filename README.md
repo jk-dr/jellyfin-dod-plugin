@@ -16,10 +16,10 @@ Appends YouTube and SoundCloud results to Jellyfin's standard search API (`/Item
   plain lyrics exist) next to the song, where Jellyfin reads them. Cleanup deletes them with the song. Setting:
   "Fetch timed lyrics".
 - **Real albums:** each result is matched against Apple's iTunes Search (no key) for its real album, track number,
-  year and cover. Only confident matches get an album (no remixes, covers or live versions); the rest are loose tracks.
+  year and cover. Only confident matches get an album (no remixes, covers or live versions); the rest become a single under their artist.
 - **First use:** when a client plays, downloads, favorites or adds a result to a playlist, the plugin downloads the
   m4a, writes the tags and cover into it with ffmpeg stream copy (no re-encoding), files it as
-  `Artist/Album/yt-ID.m4a` (or loose in the root), and has Jellyfin's own scanner index it. Albums, artists, artwork
+  `Artist/Album/yt-ID.m4a`, and has Jellyfin's own scanner index it. Albums, artists, artwork
   and "recently added" then work like any other music.
 - **Cleanup:** after each new download (and daily at 04:00) tracks played at most 3 times, not a favorite of any
   user, in no playlist and untouched for 7 days are deleted, with their empty album/artist folders. Their ids keep
@@ -38,10 +38,9 @@ Appends YouTube and SoundCloud results to Jellyfin's standard search API (`/Item
   one you already downloaded, otherwise the YouTube one. Copies on the same site are left alone.
 - **Artists:** several artists in a credit ("A, B & C") each get their own artist; " - Topic" is dropped from channel
   names. Opening an artist adds that artist's songs from the sites; artists of search results have a page too.
-- **Choosing the album:** by default a song goes into its real album (or stays loose). In the settings you can
-  instead send every download into one album you name. On the "Find and add" box you can pick, per song, an album
-  you already have (the file is saved into that album's folder, so Jellyfin needs write access there) or a new name.
-  Songs placed into an album you picked are never auto-deleted.
+- **Artist and album folders:** every song is filed as `Artist/Album/yt-ID.m4a` inside the library, and the folders are
+  created when the song is added. A song with no known album gets its own single (`Title - Single`) under its artist.
+  There is no "one album for everything" mode.
 - **Find and add:** the settings page can search and add a song directly, for apps that only search a synced copy
   of the library (e.g. Manet) and so never ask the server.
 - **Recent download problems:** the settings page lists why downloads failed; clients only show a generic error.

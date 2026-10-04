@@ -18,18 +18,6 @@
                 <div class="inputContainer" style="margin-top:.8em;">
                     <input id="faQuery" type="search" is="emby-input" placeholder="Song or artist" />
                 </div>
-                <div class="selectContainer">
-                    <label class="selectLabel" for="faDest">Put added songs in</label>
-                    <select id="faDest" is="emby-select">
-                        <option value="">Default (see settings below)</option>
-                        <option value="__new">A new album...</option>
-                    </select>
-                    <div class="fieldDescription">Pick an album you already have, and the song is saved into that album's folder (Jellyfin must be able to write there).</div>
-                </div>
-                <div id="faNewBox" style="display:none;">
-                    <div class="inputContainer"><input id="faNewAlbum" type="text" is="emby-input" label="Album name" placeholder="Album name" /></div>
-                    <div class="inputContainer"><input id="faNewArtist" type="text" is="emby-input" label="Album artist" placeholder="Album artist (optional)" /></div>
-                </div>
                 <button is="emby-button" type="button" id="faSearch" class="raised"><span>Search</span></button>
                 <div id="faStatus" class="fieldDescription"></div>
                 <div id="faResults"></div>
@@ -114,22 +102,6 @@
                     <div id="libCustomBox" class="inputContainer" style="display:none;">
                         <label class="inputLabel inputLabelUnfocused" for="libCustom">Folder (a path inside the Jellyfin container)</label>
                         <input id="libCustom" type="text" is="emby-input" placeholder="/media/music" />
-                    </div>
-                    <div class="selectContainer">
-                        <label class="selectLabel" for="albumMode">Where downloaded songs go</label>
-                        <select id="albumMode" is="emby-select">
-                            <option value="auto">Their real album when known, otherwise as a loose song</option>
-                            <option value="fixed">One album I name below</option>
-                        </select>
-                        <div class="fieldDescription">Applies to songs you play from a search. Songs you already downloaded stay where they are.</div>
-                    </div>
-                    <div class="inputContainer">
-                        <label class="inputLabel inputLabelUnfocused" for="albumName">Album name (when using one album)</label>
-                        <input id="albumName" type="text" is="emby-input" />
-                    </div>
-                    <div class="inputContainer">
-                        <label class="inputLabel inputLabelUnfocused" for="albumArtist">Album artist (when using one album)</label>
-                        <input id="albumArtist" type="text" is="emby-input" />
                     </div>
                     <div class="checkboxContainer checkboxContainer-withDescription">
                         <label>
@@ -272,10 +244,7 @@
                     $('scHideDrm').checked = c.HideUnplayableSoundCloud !== false;
                     $('normEnabled').checked = c.NormalizeAudio !== false;
                     $('lyrEnabled').checked = c.FetchLyrics !== false;
-                    $('albumMode').value = c.AlbumMode || 'auto';
                     loadLibraries(c.LibraryPath || '');
-                    $('albumName').value = c.FixedAlbumName || '';
-                    $('albumArtist').value = c.FixedAlbumArtist || '';
                     $('clMaxPlays').value = c.CleanupMaxPlays;
                     $('clDays').value = c.CleanupRetentionDays;
                     $('scMaxResults').value = c.SoundCloudMaxResults;
@@ -335,9 +304,6 @@
                     c.NormalizeAudio = $('normEnabled').checked;
                     c.FetchLyrics = $('lyrEnabled').checked;
                     c.LibraryPath = $('libSel').value === '__custom' ? $('libCustom').value.trim() : $('libSel').value;
-                    c.AlbumMode = $('albumMode').value;
-                    c.FixedAlbumName = $('albumName').value.trim() || 'YouTube & SoundCloud';
-                    c.FixedAlbumArtist = $('albumArtist').value.trim() || 'Various Artists';
                     c.CleanupMaxPlays = Math.max(0, parseInt($('clMaxPlays').value, 10) || 0);
                     c.CleanupRetentionDays = Math.max(0, parseInt($('clDays').value, 10) || 0);
                     c.SoundCloudMaxResults = Math.max(0, parseInt($('scMaxResults').value, 10) || 0);
@@ -401,32 +367,6 @@
             }
             $('libSel').addEventListener('change', function () { $('libCustomBox').style.display = this.value === '__custom' ? 'block' : 'none'; });
 
-            function destinationQuery() {
-                var v = $('faDest').value;
-                if (v === '__new') {
-                    var name = $('faNewAlbum').value.trim();
-                    var artist = $('faNewArtist').value.trim();
-                    return name ? '&album=' + encodeURIComponent(name) + (artist ? '&albumArtist=' + encodeURIComponent(artist) : '') : '';
-                }
-                return v ? '&albumId=' + encodeURIComponent(v) : '';
-            }
-
-            function loadAlbums() {
-                api('GET', 'Albums').then(function (albums) {
-                    var sel = $('faDest');
-                    var keep = sel.value;
-                    while (sel.options.length > 2) { sel.remove(2); }
-                    albums.forEach(function (a) {
-                        var o = document.createElement('option');
-                        o.value = a.id;
-                        o.textContent = a.name + (a.artist ? ' \u2014 ' + a.artist : '');
-                        sel.appendChild(o);
-                    });
-                    sel.value = keep;
-                });
-            }
-            $('faDest').addEventListener('change', function () { $('faNewBox').style.display = this.value === '__new' ? 'block' : 'none'; });
-
             function runSearch() {
                 var q = $('faQuery').value.trim();
                 if (q.length < 3) { $('faStatus').textContent = 'Type at least 3 characters.'; return; }
@@ -451,7 +391,7 @@
                         btn.type = 'button';
                         btn.addEventListener('click', function () {
                             btn.disabled = true; status.textContent = 'Downloading...';
-                            api('POST', 'Add?id=' + r.id + destinationQuery()).then(function (res) {
+                            api('POST', 'Add?id=' + r.id).then(function (res) {
                                 status.textContent = res.message;
                                 if (!res.ok) { btn.disabled = false; loadFailures(); }
                             }).catch(function () { status.textContent = 'Failed. See the Jellyfin log.'; btn.disabled = false; });
@@ -465,7 +405,7 @@
             $('faSearch').addEventListener('click', runSearch);
             $('faQuery').addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); runSearch(); } });
 
-            page.addEventListener('pageshow', function () { load(); loadFailures(); loadAlbums(); });
+            page.addEventListener('pageshow', function () { load(); loadFailures(); });
         })();
     </script>
 </div>
