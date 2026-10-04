@@ -375,7 +375,7 @@ public class LibraryService
 
     public IReadOnlyList<(string Name, string Path, bool Writable)> MusicLibraries() =>
         _library.GetVirtualFolders()
-            .Where(v => v.CollectionType == CollectionTypeOptions.music)
+            .Where(v => v.CollectionType is null or CollectionTypeOptions.music)
             .SelectMany(v => v.Locations.Select(l => (v.Name, Path: l.TrimEnd('/'))))
             .Where(l => IsAcceptableRoot(l.Path))
             .Select(l => (l.Name, l.Path, Directory.Exists(l.Path) && CanWrite(l.Path)))
