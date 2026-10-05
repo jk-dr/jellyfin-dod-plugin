@@ -127,6 +127,15 @@
                             <span>Hide SoundCloud tracks that can't be downloaded (DRM / 30-second previews)</span>
                         </label>
                     </div>
+                    <div class="inputContainer">
+                        <label class="inputLabel inputLabelUnfocused" for="syncDays">Apps that search a synced copy of the library (Manet): offer results searched for in the last this many days (0 = off)</label>
+                        <input id="syncDays" type="number" is="emby-input" min="0" max="365" />
+                        <div class="fieldDescription">Such apps never ask the server to search. Search for something here (the web client or "Find and add"), then refresh the app: the results are in its library and download when played.</div>
+                    </div>
+                    <div class="inputContainer">
+                        <label class="inputLabel inputLabelUnfocused" for="syncClients">...for these apps (names, comma separated)</label>
+                        <input id="syncClients" type="text" is="emby-input" />
+                    </div>
                     <div class="checkboxContainer checkboxContainer-withDescription">
                         <label>
                             <input id="clEnabled" type="checkbox" is="emby-checkbox" />
@@ -254,6 +263,8 @@
                     loadLibraries(c.LibraryPath || '');
                     $('clMaxPlays').value = c.CleanupMaxPlays;
                     $('clDays').value = c.CleanupRetentionDays;
+                    $('syncDays').value = c.SyncRecentDays === undefined ? 7 : c.SyncRecentDays;
+                    $('syncClients').value = c.SyncClients === undefined ? 'Manet' : c.SyncClients;
                     $('scMaxResults').value = c.SoundCloudMaxResults;
                     $('scEnabled').checked = c.EnableSoundCloud !== false;
                     $('ytCacheMinutes').value = c.SearchCacheMinutes;
@@ -314,6 +325,8 @@
                     c.LibraryPath = $('libSel').value === '__custom' ? $('libCustom').value.trim() : $('libSel').value;
                     c.CleanupMaxPlays = Math.max(0, parseInt($('clMaxPlays').value, 10) || 0);
                     c.CleanupRetentionDays = Math.max(0, parseInt($('clDays').value, 10) || 0);
+                    c.SyncRecentDays = Math.max(0, parseInt($('syncDays').value, 10) || 0);
+                    c.SyncClients = $('syncClients').value.trim();
                     c.SoundCloudMaxResults = Math.max(0, parseInt($('scMaxResults').value, 10) || 0);
                     c.EnableSoundCloud = $('scEnabled').checked;
                     c.SearchCacheMinutes = parseInt($('ytCacheMinutes').value, 10) || 0;

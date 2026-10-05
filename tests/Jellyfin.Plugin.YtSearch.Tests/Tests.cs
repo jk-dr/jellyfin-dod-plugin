@@ -915,6 +915,29 @@ public class LibraryChoiceTests
         Assert.Equal("Real Album", AlbumPolicy.For(track, meta with { Album = "Real Album" }).Album);
     }
 
+    [Theory]
+    [InlineData(0, 200, 5, 5, 0, 195)]
+    [InlineData(200, 200, 5, 0, 195, 200)]
+    [InlineData(0, 3, 5, 3, 0, 0)]
+    [InlineData(3, 4, 5, 2, 0, 2)]
+    [InlineData(0, null, 5, 5, 0, null)]
+    public void TheSyncPagingIsShiftedBehindTheInjectedItems(int start, int? limit, int injected, int fromInjected, int realStart, int? realLimit)
+    {
+        var plan = Jellyfin.Plugin.YtSearch.Middleware.SyncInjection.Plan(start, limit, injected);
+        Assert.Equal((fromInjected, realStart, realLimit), plan);
+    }
+
+    [Fact]
+    public void InjectedItemsGoInFrontAndCountInTheTotal()
+    {
+        var body = System.Text.Encoding.UTF8.GetBytes("{\"Items\":[{\"Id\":\"a\"},{\"Id\":\"b\"},{\"Id\":\"c\"}],\"TotalRecordCount\":10,\"StartIndex\":0}");
+        var page = new[] { (System.Text.Json.Nodes.JsonNode)System.Text.Json.Nodes.JsonNode.Parse("{\"Id\":\"x\"}")! };
+        var merged = Jellyfin.Plugin.YtSearch.Middleware.SyncInjection.Merge(body, page, 4, 0, 2);
+        var root = System.Text.Json.Nodes.JsonNode.Parse(merged!)!;
+        Assert.Equal(new[] { "x", "a", "b" }, root["Items"]!.AsArray().Select(n => n!["Id"]!.GetValue<string>()).ToArray());
+        Assert.Equal(14, root["TotalRecordCount"]!.GetValue<int>());
+    }
+
     [Fact]
     public void ATemporaryArtistUsesTheChannelsSpellingOfTheName()
     {

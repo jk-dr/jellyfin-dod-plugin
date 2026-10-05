@@ -54,6 +54,13 @@ public class TrackRegistry
         return _bySource.Values.Select(v => v.Track).Where(t => t.Meta is not null && !t.IsAlbumStub && t.AlbumId == albumId).OrderBy(t => t.Meta!.DiscNumber ?? 1).ThenBy(t => t.Meta!.TrackNumber ?? 999).ThenBy(t => t.DisplayTitle).ToList();
     }
 
+    /// <summary>Everything handed out since <paramref name="since"/>, most recent first.</summary>
+    public IReadOnlyList<(TrackResult Track, DateTime LastSeen)> Recent(DateTime since, int max)
+    {
+        EnsureLoaded();
+        return _bySource.Values.Where(v => v.LastSeen >= since).OrderByDescending(v => v.LastSeen).Take(max).Select(v => (v.Track, v.LastSeen)).ToList();
+    }
+
     /// <summary>Finds the track (and the artist's name) behind an artist id handed out in search results.</summary>
     public (TrackResult Track, string Name)? FindArtist(Guid artistId)
     {

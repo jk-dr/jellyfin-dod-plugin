@@ -49,6 +49,15 @@ public class PluginConfiguration : BasePluginConfiguration
     /// <summary>Fill artist pages with the songs and albums found on the artist's own YouTube channel and SoundCloud profile.</summary>
     public bool UseArtistProfiles { get; set; } = true;
 
+    /// <summary>
+    /// For apps that search a synced copy of the library instead of asking the server (e.g. Manet): results searched for in the
+    /// last this many days are added to the library lists those apps sync. 0 turns it off.
+    /// </summary>
+    public int SyncRecentDays { get; set; } = 7;
+
+    /// <summary>Apps (by name, comma separated) that get the recent results in their library sync.</summary>
+    public string SyncClients { get; set; } = "Manet";
+
     public bool EnableSoundCloud { get; set; } = true;
 
     public int SoundCloudMaxResults { get; set; } = 10;

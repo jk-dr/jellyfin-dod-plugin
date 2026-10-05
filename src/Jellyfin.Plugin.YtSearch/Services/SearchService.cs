@@ -188,6 +188,9 @@ public class SearchService
 
     public (TrackResult Track, string Name)? FindArtist(Guid artistId) => _registry.FindArtist(artistId);
 
+    /// <summary>Results handed out in the last <paramref name="since"/>, most recent first.</summary>
+    public IReadOnlyList<(TrackResult Track, DateTime LastSeen)> Recent(TimeSpan since, int max) => _registry.Recent(DateTime.UtcNow - since, max);
+
     /// <summary>
     /// The same song on both sites: if you already have one copy, only that one is shown; otherwise YouTube wins and the
     /// SoundCloud copy is hidden. Copies on the same site are left alone.

@@ -58,6 +58,12 @@ Appends YouTube and SoundCloud results to Jellyfin's standard search API (`/Item
   Albums and songs you already have are left out, and songs missing from an album you have are added to that album.
   The first look at an artist takes a few seconds (cached for 6 hours; the catalog part answers first, the profile
   part joins in on the next look). Setting: "Fill artist pages ...".
+- **Manet (apps that sync the library):** Manet copies the whole library into its own database (paged `Items` and
+  `Artists` requests for the library) and searches that copy, so it never asks the server to search. For apps listed
+  in the "SyncClients" setting (default `Manet`), everything searched for in the last `SyncRecentDays` days (default 7,
+  0 = off) is put in front of those lists as if it were the newest items of the library: songs, albums and artists. Search
+  for something in the web client or "Find and add", then refresh Manet; the results are in its library and search, and a
+  song downloads (and becomes a real library item) when played. Other apps' library views are not changed.
 - **Find and add:** the settings page can search and add a song directly, for apps that only search a synced copy
   of the library (e.g. Manet) and so never ask the server.
 - **Recent download problems:** the settings page lists why downloads failed; clients only show a generic error.

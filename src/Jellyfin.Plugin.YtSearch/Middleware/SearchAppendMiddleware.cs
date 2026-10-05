@@ -246,6 +246,32 @@ public class SearchAppendMiddleware
                 return;
             }
 
+            // An app that syncs the whole library (Manet): put the recent results in front of the lists it copies.
+            if ((isItems || isArtistsPath) && term.Length == 0 && Plugin.Instance?.Configuration.SyncRecentDays > 0
+                && Guid.TryParse(req.Query["parentId"].ToString(), out var syncParent) && syncParent == _library.MusicLibraryId
+                && ArtistIdOf(req) is null && await IsSyncClientAsync(ctx))
+            {
+                var injected = SyncNodes(req, isArtistsPath);
+                if (injected.Count > 0)
+                {
+                    int.TryParse(req.Query["startIndex"], out var syncStart);
+                    int? syncLimit = int.TryParse(req.Query["limit"], out var parsedLimit) ? parsedLimit : null;
+                    var (fromInjected, realStart, realLimit) = SyncInjection.Plan(syncStart, syncLimit, injected.Count);
+                    var page = injected.Skip(Math.Max(0, syncStart)).Take(fromInjected).ToList();
+                    var query = req.Query.Where(kv => !kv.Key.Equals("startIndex", StringComparison.OrdinalIgnoreCase) && !kv.Key.Equals("limit", StringComparison.OrdinalIgnoreCase))
+                        .SelectMany(kv => kv.Value.Select(v => new KeyValuePair<string, string?>(kv.Key, v)))
+                        .Append(new KeyValuePair<string, string?>("startIndex", realStart.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+                    if (realLimit is { } rl)
+                    {
+                        query = query.Append(new KeyValuePair<string, string?>("limit", Math.Max(1, rl).ToString(System.Globalization.CultureInfo.InvariantCulture)));
+                    }
+
+                    req.QueryString = QueryString.Create(query);
+                    await AppendOnlineAsync(ctx, body => Task.FromResult(SyncInjection.Merge(body, page, injected.Count, syncStart, realLimit)), $"Library sync ({injected.Count} recent results)");
+                    return;
+                }
+            }
+
             if (isItems && term.Length < 2 && firstPage)
             {
                 var artistId = ArtistIdOf(req);
@@ -281,6 +307,135 @@ public class SearchAppendMiddleware
         }
 
         await _next(ctx);
+    }
+
+    /// <summary>Whether the caller is a signed-in, allowed user of an app that copies the library (see the SyncClients setting).</summary>
+    private async Task<bool> IsSyncClientAsync(HttpContext ctx)
+    {
+        var names = (Plugin.Instance?.Configuration.SyncClients ?? string.Empty).Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (names.Length == 0)
+        {
+            return false;
+        }
+
+        try
+        {
+            var info = await _auth.GetAuthorizationInfo(ctx).ConfigureAwait(false);
+            if (!info.IsAuthenticated || !(info.IsApiKey || (info.User is { } user && _library.UserCanUse(user))))
+            {
+                return false;
+            }
+
+            var who = (info.Client ?? string.Empty) + " " + ctx.Request.Headers.UserAgent;
+            return names.Any(n => who.Contains(n, StringComparison.OrdinalIgnoreCase));
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    private const int MaxSyncTracks = 400;
+    private const int MaxSyncAlbums = 120;
+    private const int MaxSyncArtists = 60;
+
+    /// <summary>
+    /// The recent results as library entries for a sync of the whole library: songs, albums or artists as asked,
+    /// with the extra fields such apps request (dates, sort name, genres, media source).
+    /// </summary>
+    private List<JsonNode> SyncNodes(HttpRequest req, bool artistsList)
+    {
+        var days = Math.Clamp(Plugin.Instance?.Configuration.SyncRecentDays ?? 7, 1, 365);
+        var recent = _search.Recent(TimeSpan.FromDays(days), 3000).Where(r => r.Track.Meta is not null || !r.Track.IsAlbumStub).ToList();
+        var types = req.Query["includeItemTypes"].SelectMany(v => (v ?? string.Empty).Split(',', StringSplitOptions.RemoveEmptyEntries)).ToList();
+        var serverId = _host.SystemId;
+        var nodes = new List<JsonNode>();
+
+        if (artistsList)
+        {
+            var artists = recent
+                .SelectMany(r => (r.Track.IsAlbumStub ? new[] { r.Track.PrimaryAlbumArtist } : r.Track.ArtistNames.Append(r.Track.PrimaryAlbumArtist)).Select(n => (r.Track, Name: n, r.LastSeen)))
+                .Where(x => x.Name.Length > 0 && _library.ArtistIdByName(x.Name) is null)
+                .GroupBy(x => x.Name, StringComparer.OrdinalIgnoreCase)
+                .Select(g => g.First())
+                .Take(MaxSyncArtists);
+            foreach (var a in artists)
+            {
+                nodes.Add(SyncFields(Artist(a.Track, a.Name, serverId), a.Name, a.LastSeen, null, 0));
+            }
+
+            return nodes;
+        }
+
+        if (types.Contains("MusicAlbum", StringComparer.OrdinalIgnoreCase))
+        {
+            var albums = recent
+                .Where(r => r.Track.Meta is not null && _library.GetItem(r.Track.AlbumId) is null)
+                .GroupBy(r => r.Track.AlbumId)
+                .Select(g => g.First())
+                .Take(MaxSyncAlbums);
+            foreach (var a in albums)
+            {
+                nodes.Add(RealArtistIds(SyncFields(Album(a.Track, serverId, _search.TracksOfAlbum(a.Track.AlbumId)), a.Track.Meta!.Album, a.LastSeen, a.Track.Meta.Genre, 0)));
+            }
+        }
+
+        if (types.Contains("Audio", StringComparer.OrdinalIgnoreCase))
+        {
+            foreach (var t in recent.Where(r => !r.Track.IsAlbumStub && !_library.IsPromoted(r.Track.TrackId)).Take(MaxSyncTracks))
+            {
+                nodes.Add(RealArtistIds(SyncFields(Item(t.Track, serverId), t.Track.DisplayTitle, t.LastSeen, t.Track.Meta?.Genre, t.Track.RunTimeTicks)));
+            }
+        }
+
+        return nodes;
+    }
+
+    private static JsonObject SyncFields(JsonObject node, string name, DateTime seen, string? genre, long runTimeTicks)
+    {
+        node["DateCreated"] = DateTime.SpecifyKind(seen, DateTimeKind.Utc).ToString("o", System.Globalization.CultureInfo.InvariantCulture);
+        node["SortName"] = name.ToLowerInvariant();
+        node["Genres"] = genre is { Length: > 0 } ? new JsonArray(JsonValue.Create(genre)) : new JsonArray();
+        node["Tags"] = new JsonArray();
+        if (node["Type"]?.GetValue<string>() == "Audio")
+        {
+            var id = node["Id"]!.GetValue<string>();
+            node["MediaSources"] = new JsonArray(new JsonObject
+            {
+                ["Protocol"] = "File",
+                ["Id"] = id,
+                ["Type"] = "Default",
+                ["Container"] = "m4a",
+                ["RunTimeTicks"] = runTimeTicks,
+                ["IsRemote"] = false,
+                ["SupportsDirectPlay"] = true,
+                ["SupportsDirectStream"] = true,
+                ["SupportsTranscoding"] = true,
+                ["MediaStreams"] = new JsonArray(new JsonObject { ["Type"] = "Audio", ["Codec"] = "aac", ["Index"] = 0, ["Channels"] = 2, ["SampleRate"] = 44100, ["BitRate"] = 256000, ["IsDefault"] = true }),
+            });
+        }
+
+        return node;
+    }
+
+    /// <summary>Points an entry's artists at the library's own artist when it already has one by that name.</summary>
+    private JsonObject RealArtistIds(JsonObject node)
+    {
+        foreach (var key in new[] { "ArtistItems", "AlbumArtists" })
+        {
+            if (node[key] is JsonArray list)
+            {
+                foreach (var a in list.OfType<JsonObject>())
+                {
+                    if (a["Name"]?.GetValue<string>() is { } name && _library.ArtistIdByName(name) is { } real)
+                    {
+                        a["Id"] = N(real);
+                    }
+                }
+            }
+        }
+
+        return node;
     }
 
     /// <summary>The songs of an album that is not in the library: remembered ones, or (a catalog album) the catalog's song list.</summary>

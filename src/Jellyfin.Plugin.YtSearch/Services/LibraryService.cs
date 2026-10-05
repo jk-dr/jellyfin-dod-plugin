@@ -374,6 +374,9 @@ public class LibraryService
         return libraryId is { } id && enabledFolders.Contains(id);
     }
 
+    /// <summary>The id of the Jellyfin library downloads go into.</summary>
+    public Guid? MusicLibraryId => OurLibraryId();
+
     private Guid? OurLibraryId() =>
         TryRoot is { } root && LibraryContaining(root) is { } lib && Guid.TryParse(lib.ItemId, out var id) ? id : null;
 
