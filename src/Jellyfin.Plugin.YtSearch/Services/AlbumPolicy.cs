@@ -3,6 +3,8 @@ namespace Jellyfin.Plugin.YtSearch.Services;
 /// <summary>Makes sure every track gets an artist and an album, so it is filed as Artist/Album/ like any other song in a library.</summary>
 public static class AlbumPolicy
 {
+    private const string SingleSuffix = " - Single";
+
     /// <summary>
     /// The catalog match when there is one. Otherwise an album named after the song by the track's artist,
     /// so even songs with no known album get their own artist and album folders instead of sitting loose in the library.
@@ -11,7 +13,9 @@ public static class AlbumPolicy
     {
         if (catalog is not null)
         {
-            return catalog;
+            // The catalog calls a single's album "Title - Single"; the album is just named "Title".
+            var album = catalog.Album.EndsWith(SingleSuffix, System.StringComparison.OrdinalIgnoreCase) ? catalog.Album[..^SingleSuffix.Length].TrimEnd() : catalog.Album;
+            return album.Length == 0 || album == catalog.Album ? catalog : catalog with { Album = album };
         }
 
         var artist = InputGuard.CleanText(r.CleanArtist, 200, "Unknown Artist");

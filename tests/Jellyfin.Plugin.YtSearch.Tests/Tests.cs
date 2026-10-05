@@ -907,6 +907,15 @@ public class LibraryChoiceTests
     }
 
     [Fact]
+    public void ACatalogSinglesAlbumIsNamedJustTheTitle()
+    {
+        var track = new TrackResult(Sources.YouTube, "abcdefghijk", "Song", "Artist", 200, "", "");
+        var meta = new TrackMeta("Song", "Artist", "Song - Single", "Artist", 2020, 1, 1, null, null);
+        Assert.Equal("Song", AlbumPolicy.For(track, meta).Album);
+        Assert.Equal("Real Album", AlbumPolicy.For(track, meta with { Album = "Real Album" }).Album);
+    }
+
+    [Fact]
     public void ATemporaryArtistUsesTheChannelsSpellingOfTheName()
     {
         var results = new[] { new Jellyfin.Plugin.YtSearch.Services.YtDlpService.FlatEntry("UC_kRDKYrUlrbtrSiyu5Tflg", "TWOFACED", "", 0, "", "") };

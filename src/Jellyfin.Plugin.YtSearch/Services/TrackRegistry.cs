@@ -179,7 +179,7 @@ public class TrackRegistry
         : new TrackMeta(
             InputGuard.CleanText(m.Title, 300, "Unknown"),
             InputGuard.CleanText(m.Artist, 200, "Unknown"),
-            InputGuard.CleanText(m.Album, 200, "Unknown"),
+            InputGuard.CleanText(m.Album.EndsWith(" - Single", StringComparison.OrdinalIgnoreCase) && m.Album.Length > 9 ? m.Album[..^9] : m.Album, 200, "Unknown"), // remembered before singles lost their suffix
             InputGuard.CleanText(m.AlbumArtist, 200, "Unknown"),
             m.Year,
             m.TrackNumber,
