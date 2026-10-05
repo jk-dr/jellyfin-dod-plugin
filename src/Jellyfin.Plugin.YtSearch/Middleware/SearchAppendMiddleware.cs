@@ -231,6 +231,12 @@ public class SearchAppendMiddleware
                                 }
                             }
 
+                            if (named.Count == 0 && await _artists.TemporaryArtistAsync(term, SearchProfileBudget, ctx.RequestAborted).ConfigureAwait(false) is { } temporary)
+                            {
+                                // Not in the catalog or the song results, but the term is the name of a channel or profile: a temporary artist.
+                                named = new[] { (temporary.Track, temporary.Name) };
+                            }
+
                             current = AppendArtists(current, named, isHints, term, _host.SystemId) ?? current;
                         }
 
@@ -454,7 +460,8 @@ public class SearchAppendMiddleware
             .ToList();
 
         // The term is an artist's name: add the albums found on that artist's own profile.
-        var artist = await _artists.ArtistNamedAsync(term, results, ct).ConfigureAwait(false);
+        var artist = await _artists.ArtistNamedAsync(term, results, ct).ConfigureAwait(false)
+            ?? (await _artists.TemporaryArtistAsync(term, SearchProfileBudget, ct).ConfigureAwait(false))?.Name;
         if (artist is not null)
         {
             var placement = await _artists.ForArtistAsync(artist, _library.ArtistIdByName(artist), SearchProfileBudget, ct).ConfigureAwait(false);

@@ -62,6 +62,12 @@ public class ArtistProfileService
     {
         public static readonly Profile Empty = new(Array.Empty<ProfileAlbum>(), Array.Empty<TrackResult>(), Array.Empty<CatalogAlbum>());
 
+        /// <summary>The artist's name as their own channel or profile spells it; empty when neither exists.</summary>
+        public string Name { get; init; } = string.Empty;
+
+        /// <summary>True when the artist has a YouTube channel or SoundCloud profile (even one with no songs listed).</summary>
+        public bool HasProfile { get; init; }
+
         public bool IsEmpty => Albums.Count == 0 && Loose.Count == 0 && CatalogAlbums.Count == 0;
     }
 
@@ -153,6 +159,44 @@ public class ArtistProfileService
     }
 
     /// <summary>
+    /// A temporary artist for a search term that is exactly the name of a YouTube channel or SoundCloud profile (both are merged
+    /// into one artist). Returns the artist's name as the profile spells it and a track standing for them, or null when the term
+    /// names no such artist or the profiles are not read within <paramref name="budget"/> (the next search then finds them cached).
+    /// </summary>
+    public async Task<(TrackResult Track, string Name)?> TemporaryArtistAsync(string term, TimeSpan budget, CancellationToken ct)
+    {
+        if (!Enabled || _library.TryRoot is null || term.Split(' ', StringSplitOptions.RemoveEmptyEntries).Length > 4 || TitleKey(term).Count == 0)
+        {
+            return null;
+        }
+
+        Profile profile;
+        try
+        {
+            profile = await GetProfile(term).WaitAsync(budget, ct).ConfigureAwait(false);
+        }
+        catch (TimeoutException)
+        {
+            return null;
+        }
+
+        if (!profile.HasProfile || profile.Name.Length == 0 || !TitleKey(profile.Name).SetEquals(TitleKey(term)))
+        {
+            return null;
+        }
+
+        var tracks = profile.Albums.SelectMany(a => a.Tracks).Concat(profile.Loose).ToList();
+        if (tracks.Count == 0)
+        {
+            return null;
+        }
+
+        var rep = _library.WithId(tracks[0].Meta is null ? tracks[0] with { Meta = AlbumPolicy.For(tracks[0], null) } : tracks[0]);
+        _registry.Add(new[] { rep });
+        return (rep, profile.Name);
+    }
+
+    /// <summary>
     /// The artist's profile if it is read within <paramref name="budget"/>; otherwise just what the catalog knows (a quick
     /// lookup), while the profiles keep being read in the background for the next request.
     /// </summary>
@@ -209,14 +253,24 @@ public class ArtistProfileService
     {
         try
         {
-            var ytTask = BuildYouTubeAsync(artist);
-            var scTask = BuildSoundCloudAsync(artist);
+            // Find the artist's channel and SoundCloud profile first: their spelling of the name is used for every track.
+            var channelTask = FindChannelAsync(artist);
+            var scProfileTask = FindSoundCloudAsync(artist);
+            await Task.WhenAll(channelTask, scProfileTask).ConfigureAwait(false);
+            var channel = channelTask.Result;
+            var scProfile = scProfileTask.Result;
+            var found = channel is not null || scProfile is not null;
+            var name = channel?.Title is { Length: > 0 } ytName ? ytName : scProfile?.Name is { Length: > 0 } scName ? scName : artist;
+            name = InputGuard.CleanText(name, 200, artist);
+
+            var ytTask = BuildYouTubeAsync(name, channel?.Id);
+            var scTask = BuildSoundCloudAsync(name, scProfile);
             var catalogTask = Plugin.Instance?.Configuration.LookUpAlbums ?? true
-                ? _catalog.AlbumsOfArtistAsync(artist, CancellationToken.None)
+                ? _catalog.AlbumsOfArtistAsync(name, CancellationToken.None)
                 : Task.FromResult<IReadOnlyList<CatalogAlbum>>(Array.Empty<CatalogAlbum>());
             await Task.WhenAll(ytTask, scTask, catalogTask).ConfigureAwait(false);
             var (albums, videos) = ytTask.Result;
-            var profile = Assemble(albums, videos, scTask.Result) with { CatalogAlbums = catalogTask.Result };
+            var profile = Assemble(albums, videos, scTask.Result) with { CatalogAlbums = catalogTask.Result, Name = found ? name : string.Empty, HasProfile = found };
             _logger.LogInformation("Profile of '{Artist}': {Albums} albums, {Loose} other songs, {Catalog} catalog albums", artist, profile.Albums.Count, profile.Loose.Count, profile.CatalogAlbums.Count);
             return profile;
         }
@@ -227,11 +281,10 @@ public class ArtistProfileService
         }
     }
 
-    private async Task<(List<ProfileAlbum> Albums, List<TrackResult> Videos)> BuildYouTubeAsync(string artist)
+    private async Task<(List<ProfileAlbum> Albums, List<TrackResult> Videos)> BuildYouTubeAsync(string artist, string? channel)
     {
         var albums = new List<ProfileAlbum>();
         var videos = new List<TrackResult>();
-        var channel = await FindChannelAsync(artist).ConfigureAwait(false);
         if (channel is null)
         {
             return (albums, videos);
@@ -286,15 +339,14 @@ public class ArtistProfileService
         return (albums, videos);
     }
 
-    private async Task<List<TrackResult>> BuildSoundCloudAsync(string artist)
+    private async Task<(string Name, string Url)?> FindSoundCloudAsync(string artist) =>
+        Plugin.Instance?.Configuration.EnableSoundCloud ?? true
+            ? await _online.FindSoundCloudProfileAsync(artist, CancellationToken.None).ConfigureAwait(false)
+            : null;
+
+    private async Task<List<TrackResult>> BuildSoundCloudAsync(string artist, (string Name, string Url)? profile)
     {
         var tracks = new List<TrackResult>();
-        if (!(Plugin.Instance?.Configuration.EnableSoundCloud ?? true))
-        {
-            return tracks;
-        }
-
-        var profile = await _online.FindSoundCloudProfileAsync(artist, CancellationToken.None).ConfigureAwait(false);
         if (profile is null)
         {
             return tracks;
@@ -315,13 +367,15 @@ public class ArtistProfileService
     }
 
     /// <summary>The artist's official YouTube channel: the first channel result named exactly like the artist.</summary>
-    private async Task<string?> FindChannelAsync(string artist)
+    private async Task<(string Id, string Title)?> FindChannelAsync(string artist)
     {
         var list = await _ytdlp.ListAsync($"https://www.youtube.com/results?search_query={Uri.EscapeDataString(artist)}&sp=EgIQAg%253D%253D", 10, CancellationToken.None).ConfigureAwait(false);
-        return PickChannel(list?.Entries ?? new List<YtDlpService.FlatEntry>(), artist);
+        return PickChannelEntry(list?.Entries ?? new List<YtDlpService.FlatEntry>(), artist);
     }
 
-    internal static string? PickChannel(IEnumerable<YtDlpService.FlatEntry> results, string artist)
+    internal static string? PickChannel(IEnumerable<YtDlpService.FlatEntry> results, string artist) => PickChannelEntry(results, artist)?.Id;
+
+    internal static (string Id, string Title)? PickChannelEntry(IEnumerable<YtDlpService.FlatEntry> results, string artist)
     {
         var wanted = TitleKey(artist);
         foreach (var e in results)
@@ -329,7 +383,7 @@ public class ArtistProfileService
             var id = ChannelId.IsMatch(e.Id) ? e.Id : ChannelId.IsMatch(e.ChannelId) ? e.ChannelId : null;
             if (id is not null && wanted.Count > 0 && TitleKey(e.Title).SetEquals(wanted) && !e.Title.EndsWith("Topic", StringComparison.OrdinalIgnoreCase))
             {
-                return id;
+                return (id, e.Title);
             }
         }
 

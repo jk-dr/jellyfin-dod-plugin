@@ -51,6 +51,10 @@ Appends YouTube and SoundCloud results to Jellyfin's standard search API (`/Item
     one of these albums lists all its songs. Clicking a song looks for a matching upload (the right song and length, no
     remixes, covers or live versions): the artist's best YouTube copies first, then SoundCloud ones, moving on if a copy
     fails. It is then filed as `Artist/Album/` like everything else.
+  **Temporary artists:** if the search term is exactly the name of a YouTube channel or a SoundCloud profile (even one
+  the catalog has never heard of), an Artists entry is created for it on the spot. If the artist has both, the two are
+  merged into one artist and one song list (a song on both sites is listed once). Nothing is added to the library until
+  you play, download or favorite a song; the entry exists only while it is cached.
   Albums and songs you already have are left out, and songs missing from an album you have are added to that album.
   The first look at an artist takes a few seconds (cached for 6 hours; the catalog part answers first, the profile
   part joins in on the next look). Setting: "Fill artist pages ...".

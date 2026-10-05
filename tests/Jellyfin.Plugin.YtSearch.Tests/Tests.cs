@@ -907,6 +907,15 @@ public class LibraryChoiceTests
     }
 
     [Fact]
+    public void ATemporaryArtistUsesTheChannelsSpellingOfTheName()
+    {
+        var results = new[] { new Jellyfin.Plugin.YtSearch.Services.YtDlpService.FlatEntry("UC_kRDKYrUlrbtrSiyu5Tflg", "TWOFACED", "", 0, "", "") };
+        var picked = ArtistProfileService.PickChannelEntry(results, "twofaced");
+        Assert.Equal("TWOFACED", picked?.Title);
+        Assert.Equal("UC_kRDKYrUlrbtrSiyu5Tflg", picked?.Id);
+    }
+
+    [Fact]
     public void ProfilesMergeSoSongsOnAlbumsOrOnBothSitesAreListedOnce()
     {
         var album = new ArtistProfileService.ProfileAlbum("Discovery", new[]
