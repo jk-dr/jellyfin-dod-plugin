@@ -36,6 +36,7 @@ public class SearchAppendMiddleware
     private readonly SearchService _search;
     private readonly DownloadService _downloads;
     private readonly LibraryService _library;
+    private readonly ArtistProfileService _artists;
     private readonly IServerApplicationHost _host;
     private readonly IAuthorizationContext _auth;
     private readonly ILogger<SearchAppendMiddleware> _logger;
@@ -45,6 +46,7 @@ public class SearchAppendMiddleware
         SearchService search,
         DownloadService downloads,
         LibraryService library,
+        ArtistProfileService artists,
         IServerApplicationHost host,
         IAuthorizationContext auth,
         ILogger<SearchAppendMiddleware> logger)
@@ -54,6 +56,7 @@ public class SearchAppendMiddleware
         _search = search;
         _downloads = downloads;
         _library = library;
+        _artists = artists;
         _host = host;
         _logger = logger;
     }
@@ -193,13 +196,35 @@ public class SearchAppendMiddleware
                 return;
             }
 
-            // Opening an artist (songs of artistIds=...): add that artist's songs from the sites as well.
-            if (isItems && term.Length < 2 && WantsAudio(req) && firstPage && ArtistIdOf(req) is { } artistId)
+            if (isItems && term.Length < 2 && firstPage)
             {
-                var artistName = _library.ArtistName(artistId) ?? _search.FindArtist(artistId)?.Name;
-                if (!string.IsNullOrEmpty(artistName) && await IsAllowedAsync(ctx))
+                var artistId = ArtistIdOf(req);
+
+                // Opening an artist: its songs and albums from its YouTube and SoundCloud profiles that the library lacks.
+                if (artistId is { } id && (WantsAudio(req) || WantsAlbums(req)))
                 {
-                    await AppendOnlineAsync(ctx, _search.SearchArtistAsync(artistName, ctx.RequestAborted), false, artistName, $"Artist '{artistName}'");
+                    var artistName = _library.ArtistName(id) ?? _search.FindArtist(id)?.Name;
+                    if (!string.IsNullOrEmpty(artistName) && await IsAllowedAsync(ctx))
+                    {
+                        if (WantsAlbums(req) && !WantsAudio(req))
+                        {
+                            await AppendOnlineAsync(ctx, ArtistAlbumsAsync(artistName, id, ctx.RequestAborted), false, artistName, $"Albums of '{artistName}'", albums: true);
+                            return;
+                        }
+
+                        if (WantsAudio(req))
+                        {
+                            await AppendOnlineAsync(ctx, ArtistSongsAsync(artistName, id, ctx.RequestAborted), false, artistName, $"Artist '{artistName}'");
+                            return;
+                        }
+                    }
+                }
+
+                // Opening an album the library has: the songs of it that are missing.
+                if (artistId is null && WantsAudio(req) && Guid.TryParse(req.Query["parentId"].ToString(), out var albumParent)
+                    && _library.AlbumContents(albumParent) is not null && await IsAllowedAsync(ctx))
+                {
+                    await AppendOnlineAsync(ctx, _artists.MissingForAlbumAsync(albumParent, ProfileBudget, ctx.RequestAborted), false, string.Empty, "Album gaps");
                     return;
                 }
             }
@@ -207,6 +232,20 @@ public class SearchAppendMiddleware
 
         await _next(ctx);
     }
+
+    private static readonly TimeSpan ProfileBudget = TimeSpan.FromSeconds(20);
+
+    /// <summary>The artist's songs that are missing from the library, from their profiles; the sites' search when the profiles gave nothing.</summary>
+    private async Task<IReadOnlyList<TrackResult>> ArtistSongsAsync(string artist, Guid artistId, System.Threading.CancellationToken ct)
+    {
+        var placement = await _artists.ForArtistAsync(artist, artistId, ProfileBudget, ct).ConfigureAwait(false);
+        var songs = placement?.AllSongs.ToList();
+        return songs is { Count: > 0 } ? songs : await _search.SearchArtistAsync(artist, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>One entry per album of the artist's profile that the library does not have.</summary>
+    private async Task<IReadOnlyList<TrackResult>> ArtistAlbumsAsync(string artist, Guid artistId, System.Threading.CancellationToken ct) =>
+        (await _artists.ForArtistAsync(artist, artistId, ProfileBudget, ct).ConfigureAwait(false))?.AlbumRepresentatives.ToList() ?? new List<TrackResult>();
 
     /// <summary>Downloads every not-yet-downloaded result this request refers to. Returns false if it answered with an error.</summary>
     private async Task<bool> EnsureDownloadedAsync(HttpContext ctx, string path)
@@ -310,7 +349,7 @@ public class SearchAppendMiddleware
     }
 
     /// <summary>Lets Jellyfin answer, then adds the online results to the JSON (the searches were started before, in parallel).</summary>
-    private async Task AppendOnlineAsync(HttpContext ctx, Task<IReadOnlyList<TrackResult>> ytTask, bool isHints, string term, string label)
+    private async Task AppendOnlineAsync(HttpContext ctx, Task<IReadOnlyList<TrackResult>> ytTask, bool isHints, string term, string label, bool albums = false)
     {
         // Prevent compressed responses so the body can be edited.
         ctx.Request.Headers.Remove("Accept-Encoding");
@@ -332,7 +371,7 @@ public class SearchAppendMiddleware
             try
             {
                 var yt = await ytTask.ConfigureAwait(false);
-                var edited = Append(bytes, yt, isHints, term, _host.SystemId);
+                var edited = albums ? AppendAlbums(bytes, yt, _host.SystemId, _search.TracksOfAlbum) : Append(bytes, yt, isHints, term, _host.SystemId);
                 if (edited is not null)
                 {
                     bytes = edited;
@@ -387,6 +426,9 @@ public class SearchAppendMiddleware
         await ctx.Response.Body.WriteAsync(bytes, ctx.RequestAborted);
     }
 
+    private static bool WantsAlbums(HttpRequest req) =>
+        req.Query["includeItemTypes"].SelectMany(v => (v ?? string.Empty).Split(',', StringSplitOptions.RemoveEmptyEntries)).Contains("MusicAlbum", StringComparer.OrdinalIgnoreCase);
+
     private static bool WantsAudio(HttpRequest req)
     {
         var types = req.Query["includeItemTypes"].SelectMany(v => (v ?? string.Empty).Split(',', StringSplitOptions.RemoveEmptyEntries)).ToList();
@@ -422,6 +464,31 @@ public class SearchAppendMiddleware
         foreach (var r in fresh)
         {
             arr.Add(hints ? Hint(r, term) : Item(r, serverId));
+        }
+
+        root["TotalRecordCount"] = (root["TotalRecordCount"]?.GetValue<int>() ?? existing) + fresh.Count;
+        return System.Text.Encoding.UTF8.GetBytes(root.ToJsonString());
+    }
+
+    /// <summary>Adds albums (one entry each, standing for the album) that the response does not list yet.</summary>
+    internal static byte[]? AppendAlbums(byte[] body, IReadOnlyList<TrackResult> representatives, string serverId, Func<Guid, IReadOnlyList<TrackResult>> tracksOf)
+    {
+        if (representatives.Count == 0 || JsonNode.Parse(body) is not JsonObject root || root["Items"] is not JsonArray arr)
+        {
+            return null;
+        }
+
+        var present = arr.Select(n => n?["Id"]?.GetValue<string>()).Where(i => i is not null && Guid.TryParse(i, out _)).Select(i => Guid.Parse(i!)).ToHashSet();
+        var fresh = representatives.Where(r => r.Meta is not null && !present.Contains(r.AlbumId)).ToList();
+        if (fresh.Count == 0)
+        {
+            return null;
+        }
+
+        var existing = arr.Count;
+        foreach (var r in fresh)
+        {
+            arr.Add(Album(r, serverId, tracksOf(r.AlbumId)));
         }
 
         root["TotalRecordCount"] = (root["TotalRecordCount"]?.GetValue<int>() ?? existing) + fresh.Count;

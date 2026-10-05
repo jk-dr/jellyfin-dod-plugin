@@ -105,6 +105,12 @@
                     </div>
                     <div class="checkboxContainer checkboxContainer-withDescription">
                         <label>
+                            <input id="profEnabled" type="checkbox" is="emby-checkbox" />
+                            <span>Fill artist pages with the songs and albums from the artist's own YouTube channel and SoundCloud profile (and add missing songs to albums you have)</span>
+                        </label>
+                    </div>
+                    <div class="checkboxContainer checkboxContainer-withDescription">
+                        <label>
                             <input id="normEnabled" type="checkbox" is="emby-checkbox" />
                             <span>Level the volume of downloads (stores ReplayGain tags; the audio is not re-encoded)</span>
                         </label>
@@ -243,6 +249,7 @@
                     $('dbgAll').checked = c.LogAllApiRequests === true;
                     $('scHideDrm').checked = c.HideUnplayableSoundCloud !== false;
                     $('normEnabled').checked = c.NormalizeAudio !== false;
+                    $('profEnabled').checked = c.UseArtistProfiles !== false;
                     $('lyrEnabled').checked = c.FetchLyrics !== false;
                     loadLibraries(c.LibraryPath || '');
                     $('clMaxPlays').value = c.CleanupMaxPlays;
@@ -302,6 +309,7 @@
                     c.LogAllApiRequests = $('dbgAll').checked;
                     c.HideUnplayableSoundCloud = $('scHideDrm').checked;
                     c.NormalizeAudio = $('normEnabled').checked;
+                    c.UseArtistProfiles = $('profEnabled').checked;
                     c.FetchLyrics = $('lyrEnabled').checked;
                     c.LibraryPath = $('libSel').value === '__custom' ? $('libCustom').value.trim() : $('libSel').value;
                     c.CleanupMaxPlays = Math.max(0, parseInt($('clMaxPlays').value, 10) || 0);

@@ -88,9 +88,9 @@ public class DownloadService
             _logger.LogInformation("Downloading {Source} '{Title}' ({Id})", track.Source, track.Title, track.SourceId);
             var lyricsTask = _lyrics.FetchAsync(track, cts.Token); // runs while the audio downloads
             var file = await _ytdlp.DownloadAsync(track, tmp, cts.Token).ConfigureAwait(false);
-            var tagged = await _tagger.TagAsync(file, track, tmp, cts.Token).ConfigureAwait(false);
+            var (tagged, gain) = await _tagger.TagAsync(file, track, tmp, cts.Token).ConfigureAwait(false);
             var sidecar = LyricsClient.ForSidecar(await lyricsTask.ConfigureAwait(false));
-            await _library.PromoteAsync(track, tagged, CancellationToken.None, sidecar).ConfigureAwait(false);
+            await _library.PromoteAsync(track, tagged, CancellationToken.None, sidecar, gain).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {

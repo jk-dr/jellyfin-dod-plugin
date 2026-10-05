@@ -800,24 +800,22 @@ public class LibraryChoiceTests
     private const string Ebur = "[Parsed_ebur128_0 @ 0x1] Summary:\n\n  Integrated loudness:\n    I:         -21.8 LUFS\n    Threshold: -31.8 LUFS\n\n  Loudness range:\n    LRA:         0.0 LU\n\n  True peak:\n    Peak:      -14.5 dBFS\n";
 
     [Fact]
-    public void LoudnessIsReadFromTheEbur128SummaryAndBecomesReplayGain()
+    public void LoudnessIsReadFromTheEbur128SummaryAndBecomesAGain()
     {
         var l = AudioTagger.ParseLoudness("t: 0.1 M: -20 S: -20 I: -5.0 LUFS LRA: 0.0 LU\n" + Ebur);
         Assert.NotNull(l);
         Assert.Equal(-21.8, l!.Lufs);
-        var tags = AudioTagger.ReplayGainTags(l).ToDictionary(t => t.Key, t => t.Value);
-        Assert.Equal("+3.80 dB", tags["REPLAYGAIN_TRACK_GAIN"]);
-        Assert.Equal("0.188365", tags["REPLAYGAIN_TRACK_PEAK"]);
+        Assert.Equal(3.8, AudioTagger.GainFor(l));
     }
 
     [Theory]
     [InlineData("")]
     [InlineData("no summary here")]
     [InlineData("Summary:\n  Integrated loudness:\n    I:         -inf LUFS\n  True peak:\n    Peak:      -inf dBFS\n")]
-    public void SilenceOrGarbageGivesNoReplayGain(string log)
+    public void SilenceOrGarbageGivesNoGain(string log)
     {
         Assert.Null(AudioTagger.ParseLoudness(log));
-        Assert.Empty(AudioTagger.ReplayGainTags(null));
+        Assert.Null(AudioTagger.GainFor(null));
     }
 
     [Fact]
@@ -855,4 +853,92 @@ public class LibraryChoiceTests
         // a missing file is no information, not an error
         Assert.Null(AudioTagger.ReadSourceInfo("/nonexistent/audio.info.json").Year);
     }
+
+    [Theory]
+    [InlineData("Daft Punk - Daft Club (Official Album Playlist)", "Daft Punk", "Daft Club")]
+    [InlineData("Random Access Memories (Full Album)", "Daft Punk", "Random Access Memories")]
+    [InlineData("Discovery - Daft Punk (Official Album Playlist)", "Daft Punk", "Discovery")]
+    public void AlbumNamesAreTakenFromPlaylistTitles(string title, string artist, string expected) =>
+        Assert.Equal(expected, ArtistProfileService.AlbumName(title, artist));
+
+    [Theory]
+    [InlineData("Daft Punk - Daft Club (Official Album Playlist)", true)]
+    [InlineData("Some Band - Debut (Full Album)", true)]
+    [InlineData("Daft Punk Experience x Fortnite", false)]
+    [InlineData("Random Access Memories - Memory Tapes", false)]
+    [InlineData("Daft Punk - Human After All (Remixes) (Official Album Playlist)", false)]
+    public void OnlyAlbumPlaylistsAreTreatedAsAlbums(string title, bool album) =>
+        Assert.Equal(album, ArtistProfileService.IsAlbumPlaylist(title));
+
+    [Fact]
+    public void TrackTitlesLoseTheArtistAndOfficialAudioWording()
+    {
+        Assert.Equal("Aerodynamite", ArtistProfileService.CleanTrackTitle("Daft Punk - Aerodynamite (Official Audio)", "Daft Punk"));
+        Assert.Equal("One More Time", ArtistProfileService.CleanTrackTitle("One More Time [Official Video]", "Daft Punk"));
+        Assert.Equal("Robot Rock (Maximum Overdrive Mix)", ArtistProfileService.CleanTrackTitle("Robot Rock (Maximum Overdrive Mix) (Official Audio)", "Daft Punk"));
+        Assert.Equal("Da Funk", ArtistProfileService.CleanTrackTitle("Da Funk (Official Music Video Remastered)", "Daft Punk"));
+    }
+
+    [Fact]
+    public void OnlyRealSongsAreTaken()
+    {
+        Assert.True(ArtistProfileService.IsSong("Get Lucky", 248));
+        Assert.False(ArtistProfileService.IsSong("Get Lucky (Remix)", 248));
+        Assert.False(ArtistProfileService.IsSong("Daft Punk live in Paris", 248));
+        Assert.False(ArtistProfileService.IsSong("Best of Daft Punk mix", 248));
+        Assert.False(ArtistProfileService.IsSong("Teaser", 20));
+        Assert.False(ArtistProfileService.IsSong("Daft Punk 3 hours", 10800));
+        Assert.False(ArtistProfileService.IsSong("[Private video]", 200));
+        Assert.False(ArtistProfileService.IsSong("10 Years Of Random Access Memories", 200));
+        Assert.False(ArtistProfileService.IsSong("Random Access Memories (10th Anniversary Edition) Announcement", 200));
+    }
+
+    [Fact]
+    public void TheOfficialChannelIsTheFirstExactNameThatIsNotATopicChannel()
+    {
+        var results = new[]
+        {
+            new Jellyfin.Plugin.YtSearch.Services.YtDlpService.FlatEntry("UCRr1xG_2WIDs18a6cIiCxeA", "Daft Punk - Topic", "", 0, "", ""),
+            new Jellyfin.Plugin.YtSearch.Services.YtDlpService.FlatEntry("UCAl4zrrhZFYrHamdEKSCUKg", "Daft Funk Live", "", 0, "", ""),
+            new Jellyfin.Plugin.YtSearch.Services.YtDlpService.FlatEntry("UC_kRDKYrUlrbtrSiyu5Tflg", "Daft Punk", "", 0, "", ""),
+        };
+        Assert.Equal("UC_kRDKYrUlrbtrSiyu5Tflg", ArtistProfileService.PickChannel(results, "Daft Punk"));
+        Assert.Null(ArtistProfileService.PickChannel(results, "Someone Else"));
+    }
+
+    [Fact]
+    public void ProfilesMergeSoSongsOnAlbumsOrOnBothSitesAreListedOnce()
+    {
+        var album = new ArtistProfileService.ProfileAlbum("Discovery", new[]
+        {
+            T("youtube", "aaaaaaaaaaa", "One More Time"),
+            T("youtube", "bbbbbbbbbbb", "Aerodynamic"),
+        });
+        var yt = new[] { T("youtube", "aaaaaaaaaaa", "One More Time"), T("youtube", "ccccccccccc", "Get Lucky (Official Video)") };
+        var sc = new[] { T("soundcloud", "1", "Get Lucky"), T("soundcloud", "2", "Aerodynamic"), T("soundcloud", "3", "Other Song") };
+        var merged = ArtistProfileService.Assemble(new[] { album, album }, yt, sc);
+        Assert.Single(merged.Albums);
+        Assert.Equal(new[] { "Get Lucky (Official Video)", "Other Song" }, merged.Loose.Select(t => t.DisplayTitle).ToArray());
+    }
+
+    [Fact]
+    public void FlatListingsAreParsed()
+    {
+        var list = Jellyfin.Plugin.YtSearch.Services.YtDlpService.ParseFlat("{\"title\":\"Daft Punk - Daft Club\",\"channel\":\"Daft Punk\",\"entries\":[{\"id\":\"HU7KlDJVINc\",\"title\":\"Daft Punk - Ouverture\",\"duration\":161,\"channel\":\"Daft Punk\"},{\"title\":\"no id\"}]}");
+        Assert.NotNull(list);
+        Assert.Single(list!.Entries);
+        Assert.Equal(161, list.Entries[0].Seconds);
+        Assert.Null(Jellyfin.Plugin.YtSearch.Services.YtDlpService.ParseFlat("not json"));
+    }
+
+    [Fact]
+    public void SoundCloudProfileIsTheMostFollowedExactNameMatch()
+    {
+        const string json = "{\"collection\":[{\"username\":\"Deede Collective Fans\",\"permalink_url\":\"https://soundcloud.com/fans\",\"followers_count\":900},{\"username\":\"Deede Collective\",\"permalink_url\":\"https://soundcloud.com/deedecollective\",\"followers_count\":50},{\"username\":\"deede collective\",\"permalink_url\":\"https://soundcloud.com/other\",\"followers_count\":10}]}";
+        var p = OnlineSearchClient.ParseSoundCloudProfile(json, "Deede Collective");
+        Assert.Equal("https://soundcloud.com/deedecollective", p!.Value.Url);
+        Assert.Null(OnlineSearchClient.ParseSoundCloudProfile(json, "Nobody"));
+    }
+
+    private static Jellyfin.Plugin.YtSearch.Services.TrackResult T(string src, string id, string title) => new(src, id, title, "Daft Punk", 200, "", "");
 }

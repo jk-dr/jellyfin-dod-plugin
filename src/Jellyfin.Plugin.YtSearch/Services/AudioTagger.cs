@@ -31,8 +31,11 @@ public class AudioTagger
         _logger = logger;
     }
 
-    /// <summary>Returns the tagged file's path (inside <paramref name="workDir"/>), or the input if tagging failed.</summary>
-    public async Task<string> TagAsync(string input, TrackResult track, string workDir, CancellationToken ct)
+    /// <summary>
+    /// Returns the tagged file's path (inside <paramref name="workDir"/>, or the input if tagging failed) and the volume change
+    /// in dB that brings the song to the standard level (null when it could not be measured).
+    /// </summary>
+    public async Task<(string File, double? GainDb)> TagAsync(string input, TrackResult track, string workDir, CancellationToken ct)
     {
         var output = Path.Combine(workDir, "tagged.m4a");
         try
@@ -53,8 +56,8 @@ public class AudioTagger
                 args.AddRange(new[] { "-map", "1:v:0", "-disposition:v:0", "attached_pic" });
             }
 
-            args.AddRange(new[] { "-c", "copy", "-map_metadata", "-1", "-movflags", "+faststart+use_metadata_tags" });
-            foreach (var (key, value) in Tags(track).Concat(SourceTags(track, Path.Combine(workDir, "audio.info.json"))).Concat(ReplayGainTags(loudness)))
+            args.AddRange(new[] { "-c", "copy", "-map_metadata", "-1", "-movflags", "+faststart" });
+            foreach (var (key, value) in Tags(track).Concat(SourceTags(track, Path.Combine(workDir, "audio.info.json"))))
             {
                 args.Add("-metadata");
                 args.Add($"{key}={value}");
@@ -62,12 +65,12 @@ public class AudioTagger
 
             args.Add(output);
             await RunFfmpegAsync(args, ct).ConfigureAwait(false);
-            return File.Exists(output) && new FileInfo(output).Length > 0 ? output : input;
+            return (File.Exists(output) && new FileInfo(output).Length > 0 ? output : input, GainFor(loudness));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning("Tagging {Id} failed ({Message}); using the untagged file", track.SourceId, ex.Message);
-            return input;
+            return (input, null);
         }
     }
 
@@ -194,18 +197,8 @@ public class AudioTagger
         return new Loudness(lufs, peak);
     }
 
-    internal static IEnumerable<(string Key, string Value)> ReplayGainTags(Loudness? l)
-    {
-        if (l is null)
-        {
-            yield break;
-        }
-
-        var gain = Math.Clamp(ReferenceLufs - l.Lufs, -30, 30);
-        yield return ("REPLAYGAIN_TRACK_GAIN", gain.ToString("+0.00;-0.00;+0.00", CultureInfo.InvariantCulture) + " dB");
-        yield return ("REPLAYGAIN_TRACK_PEAK", Math.Pow(10, l.TruePeakDb / 20).ToString("0.000000", CultureInfo.InvariantCulture));
-        yield return ("REPLAYGAIN_REFERENCE_LOUDNESS", "-18.00 LUFS");
-    }
+    /// <summary>The dB change that brings a measured song to the reference level (Jellyfin's normalisation gain), or null.</summary>
+    internal static double? GainFor(Loudness? l) => l is null ? null : Math.Round(Math.Clamp(ReferenceLufs - l.Lufs, -30, 30), 2);
 
     internal static IEnumerable<(string Key, string Value)> Tags(TrackResult track)
     {

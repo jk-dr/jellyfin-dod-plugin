@@ -244,6 +244,140 @@ public class YtDlpService
         return file;
     }
 
+    /// <summary>One entry of a profile, playlist or search listing (yt-dlp "flat" mode: nothing is downloaded).</summary>
+    public sealed record FlatEntry(string Id, string Title, string Url, double Seconds, string Channel, string ChannelId);
+
+    public sealed record FlatList(string Title, string Channel, IReadOnlyList<FlatEntry> Entries);
+
+    /// <summary>
+    /// Lists a YouTube channel tab, a playlist, a search results page or a SoundCloud profile with yt-dlp, without downloading.
+    /// Null when the page does not exist or yt-dlp fails (e.g. a channel without that tab).
+    /// </summary>
+    public async Task<FlatList?> ListAsync(string url, int max, CancellationToken ct)
+    {
+        if (InputGuard.SafePageUrl(url) is not { } safe)
+        {
+            return null;
+        }
+
+        try
+        {
+            await _lightGate.WaitAsync(ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            return null;
+        }
+
+        try
+        {
+            var bin = await EnsureBinaryAsync(ct).ConfigureAwait(false);
+            var psi = new ProcessStartInfo(bin)
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+            };
+            foreach (var a in new[] { "--flat-playlist", "-J", "--playlist-end", Math.Clamp(max, 1, 200).ToString(System.Globalization.CultureInfo.InvariantCulture), "--no-warnings", "-q", "--" })
+            {
+                psi.ArgumentList.Add(a);
+            }
+
+            psi.ArgumentList.Add(safe);
+            if (safe.Contains("youtube.com", StringComparison.Ordinal))
+            {
+                AddCookies(psi);
+            }
+
+            using var proc = Process.Start(psi) ?? throw new InvalidOperationException("Could not start yt-dlp");
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(TimeSpan.FromSeconds(45));
+            var stdout = proc.StandardOutput.ReadToEndAsync(cts.Token);
+            _ = proc.StandardError.ReadToEndAsync(cts.Token);
+            try
+            {
+                await proc.WaitForExitAsync(cts.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                try { proc.Kill(true); } catch (InvalidOperationException) { }
+                throw;
+            }
+
+            var json = await stdout.ConfigureAwait(false);
+            return proc.ExitCode == 0 || json.TrimStart().StartsWith('{') ? ParseFlat(json) : null;
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            return null;
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or IOException or System.ComponentModel.Win32Exception)
+        {
+            _logger.LogDebug(ex, "Listing {Url} failed", safe);
+            return null;
+        }
+        finally
+        {
+            _lightGate.Release();
+        }
+    }
+
+    internal static FlatList? ParseFlat(string json)
+    {
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            if (root.ValueKind != System.Text.Json.JsonValueKind.Object)
+            {
+                return null;
+            }
+
+            static string Str(System.Text.Json.JsonElement e, string name) =>
+                e.TryGetProperty(name, out var v) && v.ValueKind == System.Text.Json.JsonValueKind.String ? v.GetString() ?? string.Empty : string.Empty;
+
+            var entries = new List<FlatEntry>();
+            if (root.TryGetProperty("entries", out var arr) && arr.ValueKind == System.Text.Json.JsonValueKind.Array)
+            {
+                foreach (var e in arr.EnumerateArray())
+                {
+                    if (e.ValueKind != System.Text.Json.JsonValueKind.Object)
+                    {
+                        continue;
+                    }
+
+                    var id = Str(e, "id");
+                    if (id.Length == 0 || id.Length > 64)
+                    {
+                        continue;
+                    }
+
+                    var seconds = e.TryGetProperty("duration", out var d) && d.ValueKind == System.Text.Json.JsonValueKind.Number ? d.GetDouble() : 0;
+                    var channel = Str(e, "channel");
+                    if (channel.Length == 0)
+                    {
+                        channel = Str(e, "uploader");
+                    }
+
+                    entries.Add(new FlatEntry(id, InputGuard.CleanText(Str(e, "title"), 300, string.Empty), Str(e, "url"), seconds, InputGuard.CleanText(channel, 200, string.Empty), Str(e, "channel_id")));
+                }
+            }
+
+            var title = Str(root, "title");
+            var rootChannel = Str(root, "channel");
+            if (rootChannel.Length == 0)
+            {
+                rootChannel = Str(root, "uploader");
+            }
+
+            return new FlatList(InputGuard.CleanText(title, 300, string.Empty), InputGuard.CleanText(rootChannel, 200, string.Empty), entries);
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return null;
+        }
+    }
+
     /// <summary>
     /// Asks yt-dlp whether the m4a download would work, without downloading. True = yes, false = permanently not
     /// (DRM, preview-only, removed), null = inconclusive (network error, timeout), so the caller keeps the track.

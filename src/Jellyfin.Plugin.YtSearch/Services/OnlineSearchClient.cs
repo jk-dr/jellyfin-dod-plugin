@@ -54,6 +54,62 @@ public class OnlineSearchClient
         return ParseYouTube(json, max);
     }
 
+    /// <summary>The SoundCloud profile (name and address) of an artist: the most followed account whose name is exactly the artist's.</summary>
+    public async Task<(string Name, string Url)?> FindSoundCloudProfileAsync(string artist, CancellationToken ct)
+    {
+        for (var attempt = 0; attempt < 2; attempt++)
+        {
+            var clientId = await GetClientIdAsync(attempt > 0, ct).ConfigureAwait(false);
+            if (clientId is null)
+            {
+                return null;
+            }
+
+            try
+            {
+                using var request = new HttpRequestMessage(HttpMethod.Get, $"https://api-v2.soundcloud.com/search/users?q={Uri.EscapeDataString(artist)}&client_id={clientId}&limit=10");
+                return ParseSoundCloudProfile(await SendAsync(request, ct).ConfigureAwait(false), artist);
+            }
+            catch (HttpRequestException ex) when (ex.StatusCode is System.Net.HttpStatusCode.Unauthorized or System.Net.HttpStatusCode.Forbidden && attempt == 0)
+            {
+                _soundCloudClientId = null;
+            }
+        }
+
+        return null;
+    }
+
+    internal static (string Name, string Url)? ParseSoundCloudProfile(string json, string artist)
+    {
+        using var doc = JsonDocument.Parse(json);
+        if (!doc.RootElement.TryGetProperty("collection", out var list) || list.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        var wanted = string.Join(' ', RelevanceRanker.Tokens(artist));
+        (string Name, string Url, long Followers, bool Verified)? best = null;
+        foreach (var u in list.EnumerateArray())
+        {
+            var name = u.TryGetProperty("username", out var n) && n.ValueKind == JsonValueKind.String ? n.GetString() ?? string.Empty : string.Empty;
+            var url = u.TryGetProperty("permalink_url", out var p) && p.ValueKind == JsonValueKind.String ? p.GetString() : null;
+            if (wanted.Length == 0 || string.Join(' ', RelevanceRanker.Tokens(name)) != wanted
+                || InputGuard.SafePageUrl(url) is not { } safe || !Uri.TryCreate(safe, UriKind.Absolute, out var uri) || !uri.Host.EndsWith("soundcloud.com", StringComparison.Ordinal) || uri.AbsolutePath.Trim('/').Contains('/'))
+            {
+                continue;
+            }
+
+            var followers = u.TryGetProperty("followers_count", out var f) && f.ValueKind == JsonValueKind.Number ? f.GetInt64() : 0;
+            var verified = u.TryGetProperty("verified", out var v) && v.ValueKind == JsonValueKind.True;
+            if (best is null || (verified, followers).CompareTo((best.Value.Verified, best.Value.Followers)) > 0)
+            {
+                best = (name, safe.TrimEnd('/'), followers, verified);
+            }
+        }
+
+        return best is { } b ? (InputGuard.CleanText(b.Name, 200, artist), b.Url) : null;
+    }
+
     /// <summary>Playable SoundCloud tracks (DRM and preview-only ones are dropped when <paramref name="hideUnplayable"/>).</summary>
     public async Task<IReadOnlyList<TrackResult>?> SearchSoundCloudAsync(string query, int max, bool hideUnplayable, CancellationToken ct)
     {

@@ -25,6 +25,7 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
         serviceCollection.AddSingleton<LyricsClient>();
         serviceCollection.AddSingleton<FailureLog>();
         serviceCollection.AddSingleton<SearchService>();
+        serviceCollection.AddSingleton<ArtistProfileService>();
         serviceCollection.AddHostedService<YtDlpUpdater>();
         serviceCollection.AddTransient<IStartupFilter, YtStartupFilter>();
     }

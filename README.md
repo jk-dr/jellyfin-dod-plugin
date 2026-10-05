@@ -8,9 +8,10 @@ Appends YouTube and SoundCloud results to Jellyfin's standard search API (`/Item
 - **Search:** YouTube and SoundCloud are queried directly over HTTP (about 0.5 s; yt-dlp is the automatic fallback),
   merged and ranked by relevance to what you typed, and appended to the JSON of `/Items?searchTerm=` and
   `/Search/Hints`. Result ids are the ids Jellyfin will give the files, so they never change.
-- **Volume levelling:** each download is measured with ffmpeg (about 2-3 s for a 4-minute song) and the result is
-  stored as ReplayGain tags (`REPLAYGAIN_TRACK_GAIN`, reference -18 LUFS). The audio is never re-encoded. Players
-  that apply ReplayGain or Jellyfin's normalisation level the songs. Setting: "Level the volume of downloads".
+- **Volume levelling:** each download is measured with ffmpeg (about 2-3 s for a 4-minute song) and the volume change
+  that brings it to the standard level (-18 LUFS) is stored on the Jellyfin item (its normalisation gain), which
+  Jellyfin's own volume levelling uses. The audio is never re-encoded and the file keeps ordinary tags. Setting:
+  "Level the volume of downloads".
 - **Timed lyrics:** while the audio downloads, the song is looked up on lrclib.net (artist, title, album and length
   are sent there; 6 s limit, failures are ignored). Timed lyrics are saved as `yt-ID.lrc` (or `.txt` when only
   plain lyrics exist) next to the song, where Jellyfin reads them. Cleanup deletes them with the song. Setting:
@@ -42,6 +43,12 @@ Appends YouTube and SoundCloud results to Jellyfin's standard search API (`/Item
 - **Artist and album folders:** every song is filed as `Artist/Album/yt-ID.m4a` inside the library, and the folders are
   created when the song is added. A song with no known album gets its own album named after the song (`Title`) under its artist.
   There is no "one album for everything" mode.
+- **Artist pages from the artist's own profiles:** opening an artist (one you have, or one from a search result) adds
+  the songs and albums found on the artist's official YouTube channel (its "Official Album Playlist" albums and its
+  videos) and SoundCloud profile, read with yt-dlp. Albums you lack show as albums; songs missing from an album you
+  already have are added to that album; songs you already have are left out. Clicking a song downloads it the usual way
+  (YouTube first, then SoundCloud). The first look at an artist takes several seconds (cached for 6 hours). Channel
+  and profile are matched by the artist's exact name. Setting: "Fill artist pages ...".
 - **Find and add:** the settings page can search and add a song directly, for apps that only search a synced copy
   of the library (e.g. Manet) and so never ask the server.
 - **Recent download problems:** the settings page lists why downloads failed; clients only show a generic error.

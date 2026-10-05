@@ -135,6 +135,17 @@ public class LibraryService
 
         var root = Root.TrimEnd('/');
         var name = (r.Source == Sources.SoundCloud ? "sc-" : "yt-") + r.SourceId + ".m4a";
+        if (r.FolderOverride is { Length: > 0 } folder)
+        {
+            // The folder of an album that is already in a Jellyfin library (set by this plugin, checked here again).
+            if (!Path.IsPathRooted(folder) || folder.Contains("..", StringComparison.Ordinal) || LibraryContaining(folder) is null)
+            {
+                throw new ArgumentException("Invalid album folder", nameof(r));
+            }
+
+            return Path.Combine(folder.TrimEnd('/'), name);
+        }
+
         // Artist and album folders are created when the song is added: Root/Artist/Album/yt-ID.m4a.
         var path = r.Meta is { } m
             ? Path.Combine(root, InputGuard.SafeFolderName(r.PrimaryAlbumArtist, 80), InputGuard.SafeFolderName(m.Album, 100), name)
@@ -196,7 +207,7 @@ public class LibraryService
     public bool IsPromoted(Guid id) => GetItem(id) is { Path: { Length: > 0 } p } && File.Exists(p);
 
     /// <summary>Moves the tagged file into place and has Jellyfin index it.</summary>
-    public async Task PromoteAsync(TrackResult r, string taggedFile, CancellationToken ct, (string Extension, string Content)? lyrics = null)
+    public async Task PromoteAsync(TrackResult r, string taggedFile, CancellationToken ct, (string Extension, string Content)? lyrics = null, double? normalizationGain = null)
     {
         var path = PathFor(r);
         try
@@ -239,7 +250,27 @@ public class LibraryService
         }
 
         await RefreshAsync(item, ct).ConfigureAwait(false);
+        await SetNormalizationGainAsync(item, normalizationGain, ct).ConfigureAwait(false);
         _logger.LogInformation("Added {Source} track '{Title}' to the library as {Id}{Album}", r.Source, r.DisplayTitle, item.Id, r.Meta is { } m ? $" (album '{m.Album}')" : string.Empty);
+    }
+
+    /// <summary>Stores the measured volume change on the item, the value Jellyfin's own volume levelling uses.</summary>
+    private async Task SetNormalizationGainAsync(BaseItem item, double? gainDb, CancellationToken ct)
+    {
+        if (gainDb is not { } gain || item is not Audio audio)
+        {
+            return;
+        }
+
+        try
+        {
+            audio.NormalizationGain = (float)gain;
+            await audio.UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning("Could not store the volume level of {Name}: {Message}", item.Name, ex.Message);
+        }
     }
 
     /// <summary>
@@ -384,6 +415,37 @@ public class LibraryService
             return false;
         }
     }
+
+    /// <summary>The albums the library has for an artist: name, folder and the titles of the songs in it.</summary>
+    public IReadOnlyList<(string Name, string Folder, IReadOnlyList<string> Titles)> AlbumsOfArtist(Guid artistId)
+    {
+        var albums = _library.GetItemList(new InternalItemsQuery { IncludeItemTypes = new[] { Jellyfin.Data.Enums.BaseItemKind.MusicAlbum }, Recursive = true, AlbumArtistIds = new[] { artistId } })
+            .Concat(_library.GetItemList(new InternalItemsQuery { IncludeItemTypes = new[] { Jellyfin.Data.Enums.BaseItemKind.MusicAlbum }, Recursive = true, ArtistIds = new[] { artistId } }))
+            .OfType<MusicAlbum>()
+            .GroupBy(a => a.Id).Select(g => g.First())
+            .Where(a => !string.IsNullOrEmpty(a.Path) && Directory.Exists(a.Path));
+        return albums.Select(a => (a.Name, a.Path.TrimEnd('/'), (IReadOnlyList<string>)SongTitlesIn(a.Id))).ToList();
+    }
+
+    /// <summary>The title of every song the library has by an artist.</summary>
+    public IReadOnlyList<string> SongTitlesOfArtist(Guid artistId) =>
+        _library.GetItemList(new InternalItemsQuery { IncludeItemTypes = new[] { Jellyfin.Data.Enums.BaseItemKind.Audio }, Recursive = true, ArtistIds = new[] { artistId } }).Select(i => i.Name).ToList();
+
+    /// <summary>An album of the library (by id): name, artist, folder and the titles of its songs.</summary>
+    public (string Name, string Artist, string Folder, Guid ArtistId, IReadOnlyList<string> Titles)? AlbumContents(Guid albumId)
+    {
+        if (_library.GetItemById(albumId) is not MusicAlbum album || string.IsNullOrEmpty(album.Path) || !Directory.Exists(album.Path))
+        {
+            return null;
+        }
+
+        var artist = album.AlbumArtists.FirstOrDefault() ?? string.Empty;
+        var artistId = _library.GetItemList(new InternalItemsQuery { IncludeItemTypes = new[] { Jellyfin.Data.Enums.BaseItemKind.MusicArtist }, Name = artist, Recursive = true }).FirstOrDefault()?.Id ?? Guid.Empty;
+        return (album.Name, artist, album.Path.TrimEnd('/'), artistId, SongTitlesIn(album.Id));
+    }
+
+    private List<string> SongTitlesIn(Guid albumId) =>
+        _library.GetItemList(new InternalItemsQuery { ParentId = albumId, IncludeItemTypes = new[] { Jellyfin.Data.Enums.BaseItemKind.Audio }, Recursive = true }).Select(i => i.Name).ToList();
 
     /// <summary>
     /// Removes the album/artist folders that deleted tracks left empty (and only those: never other empty folders, never the

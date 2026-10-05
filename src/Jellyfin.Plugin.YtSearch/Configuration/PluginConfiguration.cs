@@ -46,6 +46,9 @@ public class PluginConfiguration : BasePluginConfiguration
     /// <summary>Fetch timed lyrics from lrclib.net (artist, title and length are sent there) and save them next to the song.</summary>
     public bool FetchLyrics { get; set; } = true;
 
+    /// <summary>Fill artist pages with the songs and albums found on the artist's own YouTube channel and SoundCloud profile.</summary>
+    public bool UseArtistProfiles { get; set; } = true;
+
     public bool EnableSoundCloud { get; set; } = true;
 
     public int SoundCloudMaxResults { get; set; } = 10;

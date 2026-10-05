@@ -25,6 +25,9 @@ public sealed record TrackResult(string Source, string SourceId, string Title, s
     /// <summary>Catalog metadata when a confident match was found.</summary>
     public TrackMeta? Meta { get; init; }
 
+    /// <summary>When set, the file goes into this existing album folder (an album that is already in a Jellyfin library).</summary>
+    public string? FolderOverride { get; init; }
+
     public long RunTimeTicks => (long)(DurationSeconds * TimeSpan.TicksPerSecond);
 
     /// <summary>The id Jellyfin gives the item once it exists, set by <see cref="LibraryService"/>. Falls back to a stable hash.</summary>
