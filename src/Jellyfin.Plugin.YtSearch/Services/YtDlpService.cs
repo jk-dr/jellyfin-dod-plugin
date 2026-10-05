@@ -194,7 +194,7 @@ public class YtDlpService
             RedirectStandardError = true,
             UseShellExecute = false,
         };
-        foreach (var a in new[] { "-f", "bestaudio[ext=m4a]", "--no-playlist", "--no-warnings", "--no-progress", "-o", Path.Combine(directory, "audio.%(ext)s") })
+        foreach (var a in new[] { "-f", "bestaudio[ext=m4a]", "--no-playlist", "--no-warnings", "--no-progress", "--write-info-json", "-o", Path.Combine(directory, "audio.%(ext)s") })
         {
             psi.ArgumentList.Add(a);
         }

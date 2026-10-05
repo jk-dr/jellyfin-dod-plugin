@@ -496,6 +496,15 @@ public class AlbumPolicyTests
     private static readonly Jellyfin.Plugin.YtSearch.Services.TrackMeta Catalog = new("Some Song", "Real Artist", "Real Album", "Real Artist", 2020, 3, 1, "Pop", "https://is1-ssl.mzstatic.com/a.jpg");
 
     [Fact]
+    public void AnArtistPrefixIsDroppedFromTheTitle()
+    {
+        var r = new Jellyfin.Plugin.YtSearch.Services.TrackResult("soundcloud", "1", "Deede Collective - Hamsafar", "Deede Collective", 106, "", "");
+        Assert.Equal("Hamsafar", Jellyfin.Plugin.YtSearch.Services.AlbumPolicy.For(r, null).Title);
+        Assert.Equal("Other - Song", Jellyfin.Plugin.YtSearch.Services.AlbumPolicy.StripArtistPrefix("Other - Song", new[] { "Deede Collective" }));
+        Assert.Equal("Queen - ", Jellyfin.Plugin.YtSearch.Services.AlbumPolicy.StripArtistPrefix("Queen - ", new[] { "Queen" }));
+    }
+
+    [Fact]
     public void CatalogMatchIsKept()
     {
         Assert.Same(Catalog, Jellyfin.Plugin.YtSearch.Services.AlbumPolicy.For(T(), Catalog));
@@ -828,5 +837,22 @@ public class LibraryChoiceTests
         const string json = "[{\"duration\":200,\"plainLyrics\":\"far\"},{\"duration\":181,\"plainLyrics\":\"plain\"},{\"duration\":183,\"syncedLyrics\":\"[00:01.00] timed\"}]";
         Assert.Equal("[00:01.00] timed", LyricsClient.PickBest(json, 180)!.Synced);
         Assert.Null(LyricsClient.PickBest("[{\"duration\":200,\"plainLyrics\":\"far\"}]", 180));
+    }
+
+    [Fact]
+    public void SourceInfoGivesYearAndGenreOnlyWhereTheCatalogHasNone()
+    {
+        using var doc = System.Text.Json.JsonDocument.Parse("{\"release_year\":1998,\"genres\":[\"Pop\"],\"genre\":\"Other\"}");
+        var info = AudioTagger.ParseSourceInfo(doc.RootElement);
+        Assert.Equal(1998, info.Year);
+        Assert.Equal("Pop", info.Genre);
+        using var d2 = System.Text.Json.JsonDocument.Parse("{\"release_date\":\"20110203\",\"genre\":\"Hip-hop\\u0007\"}");
+        Assert.Equal(2011, AudioTagger.ParseSourceInfo(d2.RootElement).Year);
+        Assert.Equal("Hip-hop", AudioTagger.ParseSourceInfo(d2.RootElement).Genre);
+        using var d3 = System.Text.Json.JsonDocument.Parse("{\"release_year\":12,\"genre\":\"\"}");
+        Assert.Null(AudioTagger.ParseSourceInfo(d3.RootElement).Year);
+        Assert.Null(AudioTagger.ParseSourceInfo(d3.RootElement).Genre);
+        // a missing file is no information, not an error
+        Assert.Null(AudioTagger.ReadSourceInfo("/nonexistent/audio.info.json").Year);
     }
 }

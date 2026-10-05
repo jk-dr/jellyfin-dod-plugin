@@ -68,7 +68,7 @@ public class SearchService
         var canonical = new HashSet<string>();
         var finals = ranked.Select(r =>
         {
-            if (_registry.TryGetBySource(r.Source, r.SourceId, out var known) && (known.Meta is not null || _library.IsPromoted(known.TrackId)))
+            if (_registry.TryGetBySource(r.Source, r.SourceId, out var known) && (IsCatalogMatch(known) || _library.IsPromoted(known.TrackId)))
             {
                 return known;
             }
@@ -90,6 +90,12 @@ public class SearchService
         _registry.Add(finals);
         return shown;
     }
+
+    /// <summary>
+    /// True for a track whose album came from the catalog lookup (which can vary between searches, so it is remembered).
+    /// A made-up album (named after the song) is always recomputed, so it is never stuck on an older naming.
+    /// </summary>
+    private static bool IsCatalogMatch(TrackResult t) => t.Meta is { } m && (m.Year is not null || m.TrackNumber is not null || m.ArtworkUrl is not null);
 
     private static int Limit(int? configured, int? perSource)
     {

@@ -104,9 +104,10 @@ public class TrackRegistry
         var now = DateTime.UtcNow;
         foreach (var t in tracks)
         {
-            var entry = _bySource.AddOrUpdate(t.Key, _ => (t, now), (_, old) => (old.Track, now));
-            _byId[entry.Track.TrackId] = entry.Track;
-            _byId[entry.Track.AlbumId] = entry.Track;
+            // The search decides which version of a track to hand out (the remembered one, or a recomputed one): store that.
+            _bySource[t.Key] = (t, now);
+            _byId[t.TrackId] = t;
+            _byId[t.AlbumId] = t;
         }
 
         SaveSoon();

@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Globalization;
 using System.Net.Http;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -53,7 +54,7 @@ public class AudioTagger
             }
 
             args.AddRange(new[] { "-c", "copy", "-map_metadata", "-1", "-movflags", "+faststart+use_metadata_tags" });
-            foreach (var (key, value) in Tags(track).Concat(ReplayGainTags(loudness)))
+            foreach (var (key, value) in Tags(track).Concat(SourceTags(track, Path.Combine(workDir, "audio.info.json"))).Concat(ReplayGainTags(loudness)))
             {
                 args.Add("-metadata");
                 args.Add($"{key}={value}");
@@ -68,6 +69,82 @@ public class AudioTagger
             _logger.LogWarning("Tagging {Id} failed ({Message}); using the untagged file", track.SourceId, ex.Message);
             return input;
         }
+    }
+
+    /// <summary>
+    /// What the site itself knew about the song, kept in the file when the catalog did not say: release year and genre, plus
+    /// the address it came from. Never overrides a tag we already have.
+    /// </summary>
+    internal static IEnumerable<(string Key, string Value)> SourceTags(TrackResult track, string infoJsonPath)
+    {
+        var have = Tags(track).Select(t => t.Key).ToHashSet();
+        var info = ReadSourceInfo(infoJsonPath);
+        if (!have.Contains("date") && info.Year is { } y)
+        {
+            yield return ("date", y.ToString(CultureInfo.InvariantCulture));
+        }
+
+        if (!have.Contains("genre") && info.Genre is { } g)
+        {
+            yield return ("genre", g);
+        }
+
+        if (InputGuard.SafePageUrl(track.PageUrl) is { } url)
+        {
+            yield return ("comment", url);
+        }
+    }
+
+    internal record SourceInfo(int? Year, string? Genre);
+
+    internal static SourceInfo ReadSourceInfo(string path)
+    {
+        try
+        {
+            if (!File.Exists(path) || new FileInfo(path).Length > 20 * 1024 * 1024)
+            {
+                return new SourceInfo(null, null);
+            }
+
+            using var doc = JsonDocument.Parse(File.ReadAllText(path));
+            return ParseSourceInfo(doc.RootElement);
+        }
+        catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException)
+        {
+            return new SourceInfo(null, null);
+        }
+    }
+
+    internal static SourceInfo ParseSourceInfo(JsonElement root)
+    {
+        int? year = null;
+        if (root.TryGetProperty("release_year", out var ry) && ry.ValueKind == JsonValueKind.Number && ry.TryGetInt32(out var yi))
+        {
+            year = yi;
+        }
+        else if (root.TryGetProperty("release_date", out var rd) && rd.ValueKind == JsonValueKind.String
+            && rd.GetString() is { Length: >= 4 } date && int.TryParse(date.AsSpan(0, 4), out var dy))
+        {
+            year = dy;
+        }
+
+        if (year is < 1900 or > 2100)
+        {
+            year = null;
+        }
+
+        string? genre = null;
+        if (root.TryGetProperty("genres", out var gs) && gs.ValueKind == JsonValueKind.Array && gs.GetArrayLength() > 0 && gs[0].ValueKind == JsonValueKind.String)
+        {
+            genre = gs[0].GetString();
+        }
+        else if (root.TryGetProperty("genre", out var g) && g.ValueKind == JsonValueKind.String)
+        {
+            genre = g.GetString();
+        }
+
+        genre = string.IsNullOrWhiteSpace(genre) ? null : InputGuard.CleanText(genre, 60, "");
+        return new SourceInfo(year, string.IsNullOrEmpty(genre) ? null : genre);
     }
 
     /// <summary>Measured loudness: integrated LUFS and true peak in dBTP.</summary>
