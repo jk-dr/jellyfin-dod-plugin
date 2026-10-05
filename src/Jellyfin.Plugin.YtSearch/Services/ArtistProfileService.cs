@@ -20,6 +20,7 @@ public class ArtistProfileService
     private static readonly TimeSpan CacheFor = TimeSpan.FromHours(6);
     private static readonly TimeSpan EmptyCacheFor = TimeSpan.FromMinutes(10);
     private const int MaxAlbumPlaylists = 12;
+    private const int MaxCatalogAlbumsWithSongs = 8;
     private const int MaxVideos = 60;
     private const double MaxSongSeconds = 15 * 60;
     private const double MinSongSeconds = 45;
@@ -38,16 +39,18 @@ public class ArtistProfileService
     private readonly OnlineSearchClient _online;
     private readonly LibraryService _library;
     private readonly TrackRegistry _registry;
+    private readonly CatalogClient _catalog;
     private readonly ILogger<ArtistProfileService> _logger;
     private readonly ConcurrentDictionary<string, (DateTime Expires, Task<Profile> Task)> _cache = new();
     private readonly object _lock = new();
 
-    public ArtistProfileService(YtDlpService ytdlp, OnlineSearchClient online, LibraryService library, TrackRegistry registry, ILogger<ArtistProfileService> logger)
+    public ArtistProfileService(YtDlpService ytdlp, OnlineSearchClient online, LibraryService library, TrackRegistry registry, CatalogClient catalog, ILogger<ArtistProfileService> logger)
     {
         _ytdlp = ytdlp;
         _online = online;
         _library = library;
         _registry = registry;
+        _catalog = catalog;
         _logger = logger;
     }
 
@@ -55,20 +58,23 @@ public class ArtistProfileService
     public sealed record ProfileAlbum(string Name, IReadOnlyList<TrackResult> Tracks);
 
     /// <summary>What an artist's profiles hold: albums, and songs that are not on an album.</summary>
-    public sealed record Profile(IReadOnlyList<ProfileAlbum> Albums, IReadOnlyList<TrackResult> Loose)
+    public sealed record Profile(IReadOnlyList<ProfileAlbum> Albums, IReadOnlyList<TrackResult> Loose, IReadOnlyList<CatalogAlbum> CatalogAlbums)
     {
-        public static readonly Profile Empty = new(Array.Empty<ProfileAlbum>(), Array.Empty<TrackResult>());
+        public static readonly Profile Empty = new(Array.Empty<ProfileAlbum>(), Array.Empty<TrackResult>(), Array.Empty<CatalogAlbum>());
 
-        public bool IsEmpty => Albums.Count == 0 && Loose.Count == 0;
+        public bool IsEmpty => Albums.Count == 0 && Loose.Count == 0 && CatalogAlbums.Count == 0;
     }
 
     /// <summary>The profile's songs sorted into: whole albums the library lacks, gaps in albums it has, and loose songs.</summary>
-    public sealed record Placement(IReadOnlyList<IReadOnlyList<TrackResult>> NewAlbums, IReadOnlyList<TrackResult> Gaps, IReadOnlyList<TrackResult> Loose)
+    public sealed record Placement(IReadOnlyList<IReadOnlyList<TrackResult>> NewAlbums, IReadOnlyList<TrackResult> Gaps, IReadOnlyList<TrackResult> Loose, IReadOnlyList<TrackResult> Stubs)
     {
-        public IEnumerable<TrackResult> AllSongs => NewAlbums.SelectMany(a => a).Concat(Gaps).Concat(Loose);
+        /// <summary>Songs of catalog albums, filled in when songs (not albums) are asked for.</summary>
+        public IReadOnlyList<TrackResult> CatalogSongs { get; init; } = Array.Empty<TrackResult>();
 
-        /// <summary>One track per missing album, standing for the album.</summary>
-        public IEnumerable<TrackResult> AlbumRepresentatives => NewAlbums.Where(a => a.Count > 0).Select(a => a[0]);
+        public IEnumerable<TrackResult> AllSongs => NewAlbums.SelectMany(a => a).Concat(Gaps).Concat(Loose).Concat(CatalogSongs);
+
+        /// <summary>One entry per missing album, standing for the album.</summary>
+        public IEnumerable<TrackResult> AlbumRepresentatives => NewAlbums.Where(a => a.Count > 0).Select(a => a[0]).Concat(Stubs);
     }
 
     public static bool Enabled => Plugin.Instance?.Configuration.UseArtistProfiles ?? true;
@@ -77,27 +83,25 @@ public class ArtistProfileService
     /// The artist's songs the library does not have yet, or null when the profiles have not been read within
     /// <paramref name="budget"/> (the reading goes on in the background and the next request is served from the cache).
     /// </summary>
-    public async Task<Placement?> ForArtistAsync(string artist, Guid? artistId, TimeSpan budget, CancellationToken ct)
+    public async Task<Placement?> ForArtistAsync(string artist, Guid? artistId, TimeSpan budget, CancellationToken ct, bool withCatalogSongs = false)
     {
         if (!Enabled || _library.TryRoot is null)
         {
             return null;
         }
 
-        Profile profile;
-        try
-        {
-            profile = await GetProfile(artist).WaitAsync(budget, ct).ConfigureAwait(false);
-        }
-        catch (TimeoutException)
-        {
-            return null;
-        }
-
+        var profile = await ProfileOrCatalogAsync(artist, budget, ct).ConfigureAwait(false);
         var albums = artistId is { } id ? _library.AlbumsOfArtist(id) : Array.Empty<(string Name, string Folder, IReadOnlyList<string> Titles)>();
         var titles = artistId is { } id2 ? _library.SongTitlesOfArtist(id2) : Array.Empty<string>();
-        var placement = Place(profile, albums, titles);
-        _registry.Add(placement.AllSongs.ToList());
+        var placement = Place(profile, artist, albums, titles);
+        if (withCatalogSongs && placement.Stubs.Count > 0)
+        {
+            // The songs of the newest few catalog albums (one lookup each, cached).
+            var lists = await Task.WhenAll(placement.Stubs.Take(MaxCatalogAlbumsWithSongs).Select(stub => TracksOfCatalogAlbumAsync(stub, ct))).ConfigureAwait(false);
+            placement = placement with { CatalogSongs = lists.SelectMany(l => l).ToList() };
+        }
+
+        _registry.Add(placement.AllSongs.Concat(placement.Stubs).ToList());
         return placement;
     }
 
@@ -109,25 +113,62 @@ public class ArtistProfileService
             return Array.Empty<TrackResult>();
         }
 
-        Profile profile;
+        var profile = await ProfileOrCatalogAsync(album.Artist, budget, ct).ConfigureAwait(false);
+
+        var match = profile.Albums.FirstOrDefault(a => NamesMatch(a.Name, album.Name));
+        List<TrackResult> gaps;
+        if (match is not null)
+        {
+            gaps = Gaps(match, (album.Name, album.Folder, album.Titles));
+        }
+        else if (profile.CatalogAlbums.FirstOrDefault(a => NamesMatch(a.Name, album.Name)) is { } catalogAlbum)
+        {
+            // The artist's channel has no such album, but the catalog does: its songs are found on the sites when played.
+            var songs = await TracksOfCatalogAlbumAsync(MakeStub(album.Artist, catalogAlbum), ct).ConfigureAwait(false);
+            gaps = Gaps(new ProfileAlbum(album.Name, songs), (album.Name, album.Folder, album.Titles));
+        }
+        else
+        {
+            return Array.Empty<TrackResult>();
+        }
+
+        _registry.Add(gaps);
+        return gaps;
+    }
+
+    /// <summary>
+    /// The artist a search term names: the name used by one of the results, else the catalog's spelling when the term is
+    /// exactly an artist's name. Null when the term is not an artist.
+    /// </summary>
+    public async Task<string?> ArtistNamedAsync(string term, IReadOnlyList<TrackResult> results, CancellationToken ct)
+    {
+        var key = TitleKey(term);
+        if (key.Count == 0)
+        {
+            return null;
+        }
+
+        return results.SelectMany(r => r.ArtistNames).FirstOrDefault(n => TitleKey(n).SetEquals(key))
+            ?? (Plugin.Instance?.Configuration.LookUpAlbums ?? true ? await _catalog.FindArtistNameAsync(term, ct).ConfigureAwait(false) : null);
+    }
+
+    /// <summary>
+    /// The artist's profile if it is read within <paramref name="budget"/>; otherwise just what the catalog knows (a quick
+    /// lookup), while the profiles keep being read in the background for the next request.
+    /// </summary>
+    private async Task<Profile> ProfileOrCatalogAsync(string artist, TimeSpan budget, CancellationToken ct)
+    {
         try
         {
-            profile = await GetProfile(album.Artist).WaitAsync(budget, ct).ConfigureAwait(false);
+            return await GetProfile(artist).WaitAsync(budget, ct).ConfigureAwait(false);
         }
         catch (TimeoutException)
         {
-            return Array.Empty<TrackResult>();
+            var albums = Plugin.Instance?.Configuration.LookUpAlbums ?? true
+                ? await _catalog.AlbumsOfArtistAsync(artist, ct).ConfigureAwait(false)
+                : Array.Empty<CatalogAlbum>();
+            return new Profile(Array.Empty<ProfileAlbum>(), Array.Empty<TrackResult>(), albums);
         }
-
-        var match = profile.Albums.FirstOrDefault(a => NamesMatch(a.Name, album.Name));
-        if (match is null)
-        {
-            return Array.Empty<TrackResult>();
-        }
-
-        var gaps = Gaps(match, (album.Name, album.Folder, album.Titles));
-        _registry.Add(gaps);
-        return gaps;
     }
 
     private Task<Profile> GetProfile(string artist)
@@ -170,10 +211,13 @@ public class ArtistProfileService
         {
             var ytTask = BuildYouTubeAsync(artist);
             var scTask = BuildSoundCloudAsync(artist);
-            await Task.WhenAll(ytTask, scTask).ConfigureAwait(false);
+            var catalogTask = Plugin.Instance?.Configuration.LookUpAlbums ?? true
+                ? _catalog.AlbumsOfArtistAsync(artist, CancellationToken.None)
+                : Task.FromResult<IReadOnlyList<CatalogAlbum>>(Array.Empty<CatalogAlbum>());
+            await Task.WhenAll(ytTask, scTask, catalogTask).ConfigureAwait(false);
             var (albums, videos) = ytTask.Result;
-            var profile = Assemble(albums, videos, scTask.Result);
-            _logger.LogInformation("Profile of '{Artist}': {Albums} albums, {Loose} other songs", artist, profile.Albums.Count, profile.Loose.Count);
+            var profile = Assemble(albums, videos, scTask.Result) with { CatalogAlbums = catalogTask.Result };
+            _logger.LogInformation("Profile of '{Artist}': {Albums} albums, {Loose} other songs, {Catalog} catalog albums", artist, profile.Albums.Count, profile.Loose.Count, profile.CatalogAlbums.Count);
             return profile;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -360,10 +404,10 @@ public class ArtistProfileService
             }
         }
 
-        return new Profile(uniqueAlbums, loose);
+        return new Profile(uniqueAlbums, loose, Array.Empty<CatalogAlbum>());
     }
 
-    private Placement Place(Profile profile, IReadOnlyList<(string Name, string Folder, IReadOnlyList<string> Titles)> libraryAlbums, IReadOnlyList<string> libraryTitles)
+    private Placement Place(Profile profile, string artist, IReadOnlyList<(string Name, string Folder, IReadOnlyList<string> Titles)> libraryAlbums, IReadOnlyList<string> libraryTitles)
     {
         var newAlbums = new List<IReadOnlyList<TrackResult>>();
         var gaps = new List<TrackResult>();
@@ -389,7 +433,46 @@ public class ArtistProfileService
             .Select(t => _library.WithId(t with { Meta = AlbumPolicy.For(t, null) }))
             .Where(t => !_library.IsPromoted(t.TrackId))
             .ToList();
-        return new Placement(newAlbums, gaps, loose);
+
+        // Albums only the catalog knows: not on the profile, not in the library.
+        var stubs = profile.CatalogAlbums
+            .Where(c => !profile.Albums.Any(a => NamesMatch(a.Name, c.Name)) && !libraryAlbums.Any(a => NamesMatch(a.Name, c.Name)))
+            .Select(c => _library.WithId(MakeStub(artist, c)))
+            .Where(stub => _library.GetItem(stub.AlbumId) is null)
+            .ToList();
+        return new Placement(newAlbums, gaps, loose, stubs);
+    }
+
+    /// <summary>The entry that stands for a catalog album on an artist page.</summary>
+    private static TrackResult MakeStub(string artist, CatalogAlbum album) =>
+        new(Sources.Catalog, "a" + album.CollectionId.ToString(System.Globalization.CultureInfo.InvariantCulture), album.Name, artist, 0, album.ArtworkUrl ?? string.Empty, string.Empty)
+        {
+            Meta = new TrackMeta(album.Name, artist, album.Name, artist, album.Year, null, null, album.Genre, album.ArtworkUrl),
+            GroupId = album.CollectionId.ToString(System.Globalization.CultureInfo.InvariantCulture),
+        };
+
+    /// <summary>The songs of a catalog album (the stub or any song of it), in album order, ready to be played (not downloaded yet).</summary>
+    public async Task<IReadOnlyList<TrackResult>> TracksOfCatalogAlbumAsync(TrackResult albumOrSong, CancellationToken ct)
+    {
+        if (albumOrSong.GroupId is not { } group || !long.TryParse(group, out var collectionId) || _library.TryRoot is null)
+        {
+            return Array.Empty<TrackResult>();
+        }
+
+        var artist = albumOrSong.PrimaryAlbumArtist;
+        var songs = await _catalog.SongsOfAlbumAsync(collectionId, ct).ConfigureAwait(false);
+        var tracks = songs
+            .Where(s => s.TrackId > 0)
+            .Select(s => _library.WithId(new TrackResult(Sources.Catalog, s.TrackId.ToString(System.Globalization.CultureInfo.InvariantCulture), s.Title, s.Artist, s.DurationSeconds, s.ArtworkUrl ?? string.Empty, string.Empty)
+            {
+                Meta = new TrackMeta(s.Title, s.Artist, albumOrSong.DisplayAlbum(), artist, s.Year, s.TrackNumber, s.DiscNumber, s.Genre, s.ArtworkUrl),
+                GroupId = group,
+                FolderOverride = albumOrSong.FolderOverride,
+            }))
+            .Where(t => !_library.IsPromoted(t.TrackId))
+            .ToList();
+        _registry.Add(tracks);
+        return tracks;
     }
 
     /// <summary>The tracks of a profile album that an album of the library lacks, placed into that album's folder.</summary>

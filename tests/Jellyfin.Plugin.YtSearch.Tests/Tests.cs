@@ -941,4 +941,70 @@ public class LibraryChoiceTests
     }
 
     private static Jellyfin.Plugin.YtSearch.Services.TrackResult T(string src, string id, string title) => new(src, id, title, "Daft Punk", 200, "", "");
+
+    private const string AlbumLookup = """
+    {"resultCount":7,"results":[
+      {"wrapperType":"artist","artistName":"Drake","artistId":271256},
+      {"wrapperType":"collection","collectionType":"Album","collectionId":1,"collectionName":"Scorpion","artistName":"Drake","releaseDate":"2018-06-29T07:00:00Z","artworkUrl100":"https://is1-ssl.mzstatic.com/a/100x100bb.jpg","primaryGenreName":"Hip-Hop/Rap"},
+      {"wrapperType":"collection","collectionType":"Album","collectionId":2,"collectionName":"Take Care (Deluxe Version)","artistName":"Drake","releaseDate":"2011-11-15T08:00:00Z"},
+      {"wrapperType":"collection","collectionType":"Album","collectionId":3,"collectionName":"Her Loss","artistName":"Drake & 21 Savage","releaseDate":"2022-11-04T07:00:00Z"},
+      {"wrapperType":"collection","collectionType":"Album","collectionId":4,"collectionName":"God's Plan - Single","artistName":"Drake","releaseDate":"2018-01-19T08:00:00Z"},
+      {"wrapperType":"collection","collectionType":"Album","collectionId":5,"collectionName":"Scorpion (Deluxe)","artistName":"Drake","releaseDate":"2018-07-01T07:00:00Z"},
+      {"wrapperType":"collection","collectionType":"Album","collectionId":6,"collectionName":"Some Compilation","artistName":"Various Artists","releaseDate":"2020-01-01T07:00:00Z"}
+    ]}
+    """;
+
+    [Fact]
+    public void CatalogAlbumsAreTheDiscographyWithoutSinglesOrRepeats()
+    {
+        var albums = CatalogClient.ParseAlbums(AlbumLookup, "Drake");
+        Assert.Equal(new[] { "Her Loss", "Scorpion", "Take Care" }, albums.Select(a => a.Name).ToArray());
+        Assert.Equal(1, albums.First(a => a.Name == "Scorpion").CollectionId); // the standard edition wins over the deluxe one
+        Assert.Equal("https://is1-ssl.mzstatic.com/a/600x600bb.jpg", albums.First(a => a.Name == "Scorpion").ArtworkUrl);
+        Assert.Equal(2011, albums.First(a => a.Name == "Take Care").Year);
+    }
+
+    [Fact]
+    public void CatalogArtistIsFoundByExactName()
+    {
+        Assert.Equal(271256, CatalogClient.ParseArtistId(AlbumLookup, "drake"));
+        Assert.Equal("Drake", CatalogClient.ParseArtistName(AlbumLookup, "DRAKE"));
+        Assert.Null(CatalogClient.ParseArtistName(AlbumLookup, "Drake Maye"));
+    }
+
+    [Fact]
+    public void CatalogSongsKeepTheirIdsInAlbumOrder()
+    {
+        const string json = "{\"results\":[{\"wrapperType\":\"collection\"},{\"kind\":\"song\",\"trackId\":22,\"trackName\":\"B\",\"artistName\":\"X\",\"collectionName\":\"A\",\"trackNumber\":2,\"discNumber\":1,\"trackTimeMillis\":200000,\"collectionId\":9},{\"kind\":\"song\",\"trackId\":21,\"trackName\":\"A\",\"artistName\":\"X\",\"collectionName\":\"A\",\"trackNumber\":1,\"discNumber\":1,\"trackTimeMillis\":100000,\"collectionId\":9}]}";
+        var songs = CatalogClient.ParseAlbumSongs(json);
+        Assert.Equal(new long[] { 21, 22 }, songs.Select(s => s.TrackId).ToArray());
+        Assert.Equal(9, songs[0].CollectionId);
+        Assert.Equal(100, songs[0].DurationSeconds);
+    }
+
+    [Theory]
+    [InlineData("God's Plan", "Drake", 199, "Drake - God's Plan (Official Audio)", "Drake - Topic", 199, true)]
+    [InlineData("God's Plan", "Drake", 199, "God's Plan", "Drake", 201, true)]
+    [InlineData("God's Plan", "Drake", 199, "God's Plan (Remix)", "Drake", 199, false)]
+    [InlineData("God's Plan", "Drake", 199, "God's Plan live", "Drake", 199, false)]
+    [InlineData("God's Plan", "Drake", 199, "God's Plan", "Drake", 260, false)]
+    [InlineData("God's Plan", "Drake", 199, "God's Plan", "Some Unrelated Channel", 199, false)]
+    [InlineData("God's Plan", "Drake", 199, "Drake - God's Plan reaction", "Drake", 199, false)]
+    public void OnlyRealCopiesOfACatalogSongAreSources(string title, string artist, double seconds, string candidateTitle, string channel, double candidateSeconds, bool expected)
+    {
+        var wanted = new TrackResult(Sources.Catalog, "1", title, artist, seconds, "", "") { Meta = new TrackMeta(title, artist, "Scorpion", artist, 2018, 5, 1, null) };
+        var candidate = new TrackResult(Sources.YouTube, "aaaaaaaaaaa", candidateTitle, channel, candidateSeconds, "", "https://www.youtube.com/watch?v=aaaaaaaaaaa");
+        Assert.Equal(expected, SearchService.IsSourceFor(wanted, candidate));
+    }
+
+    [Fact]
+    public void CatalogIdsAreNumbersAndAlbumsStandInForSongs()
+    {
+        Assert.True(InputGuard.IsValidSourceId(Sources.Catalog, "1418213269"));
+        Assert.True(InputGuard.IsValidSourceId(Sources.Catalog, "a1418213110"));
+        Assert.False(InputGuard.IsValidSourceId(Sources.Catalog, "../../x"));
+        Assert.True(new TrackResult(Sources.Catalog, "a12", "A", "X", 0, "", "").IsAlbumStub);
+        Assert.False(new TrackResult(Sources.Catalog, "12", "A", "X", 0, "", "").IsAlbumStub);
+        Assert.True(LibraryService.IsOurFile("/m", "/m/Drake/Scorpion/ct-1418213269.m4a"));
+    }
 }

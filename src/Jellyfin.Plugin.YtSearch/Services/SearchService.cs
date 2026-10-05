@@ -109,6 +109,59 @@ public class SearchService
             .Where(r => !_library.IsPromoted(r.TrackId))
             .ToList();
 
+    /// <summary>
+    /// Copies of a catalog song that can be downloaded, best first: YouTube uploads (the artist's own channel first), then
+    /// SoundCloud ones. Only uploads of the same song and length count (no remixes, covers or live versions).
+    /// </summary>
+    public async Task<IReadOnlyList<TrackResult>> FindSourcesAsync(TrackResult wanted, CancellationToken ct)
+    {
+        var query = InputGuard.CleanQuery($"{wanted.PrimaryAlbumArtist} {wanted.DisplayTitle}");
+        var cfg = Plugin.Instance?.Configuration;
+        var ytTask = SearchSourceAsync(Sources.YouTube, query, 10, ct);
+        var scTask = cfg?.EnableSoundCloud ?? true ? SearchSourceAsync(Sources.SoundCloud, query, 10, ct) : Task.FromResult<IReadOnlyList<TrackResult>>(Array.Empty<TrackResult>());
+        var yt = await ytTask.ConfigureAwait(false);
+        var sc = await scTask.ConfigureAwait(false);
+        var artistWords = ArtistWords(wanted);
+        return RankSources(wanted, yt.Where(c => IsSourceFor(wanted, c)).ToList(), artistWords)
+            .Concat(RankSources(wanted, sc.Where(c => IsSourceFor(wanted, c)).ToList(), artistWords))
+            .ToList();
+    }
+
+    /// <summary>Uploads from the artist's own channel (or its "- Topic" one) first, otherwise in the order the site gave.</summary>
+    private static IEnumerable<TrackResult> RankSources(TrackResult wanted, List<TrackResult> candidates, HashSet<string> artistWords) =>
+        candidates.OrderBy(c => ArtistWords(c).SetEquals(artistWords) ? 0 : 1);
+
+    /// <summary>True when <paramref name="candidate"/> is an upload of the song the catalog describes.</summary>
+    internal static bool IsSourceFor(TrackResult wanted, TrackResult candidate)
+    {
+        if (candidate.DurationSeconds > MaxSongSeconds)
+        {
+            return false;
+        }
+
+        if (wanted.DurationSeconds > 0 && candidate.DurationSeconds > 0
+            && Math.Abs(wanted.DurationSeconds - candidate.DurationSeconds) > Math.Max(8, 0.06 * wanted.DurationSeconds))
+        {
+            return false;
+        }
+
+        if (!NoiseWords(wanted).SetEquals(NoiseWords(candidate)))
+        {
+            return false;
+        }
+
+        var artists = ArtistWords(wanted).Union(ArtistWords(candidate)).ToHashSet();
+        var wantedWords = SongWords(wanted, artists);
+        if (wantedWords.Count == 0 || !wantedWords.IsSubsetOf(SongWords(candidate, artists)))
+        {
+            return false;
+        }
+
+        // By the artist: the channel or the title names them.
+        var titleWords = RelevanceRanker.Tokens(candidate.DisplayTitle).ToHashSet();
+        return ArtistWords(wanted).Overlaps(ArtistWords(candidate)) || ArtistWords(wanted).Overlaps(titleWords);
+    }
+
     /// <summary>Keeps results that are by the artist (channel name, credit, or "Artist - Title" title), no long mixes; YouTube first.</summary>
     internal static List<TrackResult> FilterArtistSongs(string artist, IReadOnlyList<TrackResult> results)
     {

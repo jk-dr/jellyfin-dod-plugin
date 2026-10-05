@@ -11,6 +11,9 @@ public static class Sources
 {
     public const string YouTube = "youtube";
     public const string SoundCloud = "soundcloud";
+
+    /// <summary>A song known from the music catalog but not downloaded: the audio is found on YouTube or SoundCloud when it is played.</summary>
+    public const string Catalog = "catalog";
 }
 
 /// <summary>Real music metadata for a track (from a catalog lookup). Without it a track is just a loose file.</summary>
@@ -27,6 +30,12 @@ public sealed record TrackResult(string Source, string SourceId, string Title, s
 
     /// <summary>When set, the file goes into this existing album folder (an album that is already in a Jellyfin library).</summary>
     public string? FolderOverride { get; init; }
+
+    /// <summary>Catalog collection (album) id of a catalog song or album stub.</summary>
+    public string? GroupId { get; init; }
+
+    /// <summary>True for a catalog album shown on an artist page: it stands for the album, not for a song.</summary>
+    public bool IsAlbumStub => Source == Sources.Catalog && SourceId.StartsWith('a');
 
     public long RunTimeTicks => (long)(DurationSeconds * TimeSpan.TicksPerSecond);
 
@@ -60,6 +69,8 @@ public sealed record TrackResult(string Source, string SourceId, string Title, s
 
     public string DisplayTitle => Meta?.Title ?? Title;
 
+    public string DisplayAlbum() => Meta?.Album ?? Title;
+
     /// <summary>The channel name without YouTube's automatic " - Topic" suffix.</summary>
     public string CleanArtist => StripTopic(Artist);
 
@@ -68,7 +79,7 @@ public sealed record TrackResult(string Source, string SourceId, string Title, s
     public string DisplayAlbumArtist => Meta?.AlbumArtist ?? CleanArtist;
 
     /// <summary>Tag used in image tags so clients cache per track.</summary>
-    public string ImageTag => (Source == Sources.YouTube ? "yt" : "sc") + SourceId;
+    public string ImageTag => (Source == Sources.YouTube ? "yt" : Source == Sources.Catalog ? "ct" : "sc") + SourceId;
 
     public string Key => $"{Source}:{SourceId}";
 

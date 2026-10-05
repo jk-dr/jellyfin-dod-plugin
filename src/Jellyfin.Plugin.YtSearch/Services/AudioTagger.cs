@@ -35,12 +35,12 @@ public class AudioTagger
     /// Returns the tagged file's path (inside <paramref name="workDir"/>, or the input if tagging failed) and the volume change
     /// in dB that brings the song to the standard level (null when it could not be measured).
     /// </summary>
-    public async Task<(string File, double? GainDb)> TagAsync(string input, TrackResult track, string workDir, CancellationToken ct)
+    public async Task<(string File, double? GainDb)> TagAsync(string input, TrackResult track, string workDir, CancellationToken ct, TrackResult? origin = null)
     {
         var output = Path.Combine(workDir, "tagged.m4a");
         try
         {
-            var coverTask = PrepareCoverAsync(track, workDir, ct);
+            var coverTask = PrepareCoverAsync(track, workDir, ct, origin);
             var loudnessTask = Plugin.Instance?.Configuration.NormalizeAudio ?? true ? MeasureLoudnessAsync(input, ct) : Task.FromResult<Loudness?>(null);
             var cover = await coverTask.ConfigureAwait(false);
             var loudness = await loudnessTask.ConfigureAwait(false);
@@ -57,7 +57,7 @@ public class AudioTagger
             }
 
             args.AddRange(new[] { "-c", "copy", "-map_metadata", "-1", "-movflags", "+faststart" });
-            foreach (var (key, value) in Tags(track).Concat(SourceTags(track, Path.Combine(workDir, "audio.info.json"))))
+            foreach (var (key, value) in Tags(track).Concat(SourceTags(track, Path.Combine(workDir, "audio.info.json"), origin)))
             {
                 args.Add("-metadata");
                 args.Add($"{key}={value}");
@@ -78,7 +78,7 @@ public class AudioTagger
     /// What the site itself knew about the song, kept in the file when the catalog did not say: release year and genre, plus
     /// the address it came from. Never overrides a tag we already have.
     /// </summary>
-    internal static IEnumerable<(string Key, string Value)> SourceTags(TrackResult track, string infoJsonPath)
+    internal static IEnumerable<(string Key, string Value)> SourceTags(TrackResult track, string infoJsonPath, TrackResult? origin = null)
     {
         var have = Tags(track).Select(t => t.Key).ToHashSet();
         var info = ReadSourceInfo(infoJsonPath);
@@ -92,7 +92,7 @@ public class AudioTagger
             yield return ("genre", g);
         }
 
-        if (InputGuard.SafePageUrl(track.PageUrl) is { } url)
+        if (InputGuard.SafePageUrl(origin?.PageUrl ?? track.PageUrl) is { } url)
         {
             yield return ("comment", url);
         }
@@ -234,9 +234,20 @@ public class AudioTagger
     }
 
     /// <summary>Downloads the artwork (allowlisted hosts only) and crops it to a 600x600 square, like album art.</summary>
-    private async Task<string?> PrepareCoverAsync(TrackResult track, string workDir, CancellationToken ct)
+    private async Task<string?> PrepareCoverAsync(TrackResult track, string workDir, CancellationToken ct, TrackResult? origin = null)
     {
-        if (InputGuard.SafeThumbnailUrl(track.ThumbnailUrl) is not { } url)
+        var cover = await CoverFromAsync(track.ThumbnailUrl, track, workDir, ct).ConfigureAwait(false);
+        if (cover is null && origin is not null && origin.ThumbnailUrl != track.ThumbnailUrl)
+        {
+            cover = await CoverFromAsync(origin.ThumbnailUrl, track, workDir, ct).ConfigureAwait(false);
+        }
+
+        return cover;
+    }
+
+    private async Task<string?> CoverFromAsync(string? thumbnailUrl, TrackResult track, string workDir, CancellationToken ct)
+    {
+        if (InputGuard.SafeThumbnailUrl(thumbnailUrl) is not { } url)
         {
             return null;
         }

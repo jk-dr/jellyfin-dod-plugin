@@ -20,7 +20,7 @@ public class TrackRegistry
     private const int MaxEntries = 20000;
     private static readonly TimeSpan MaxAge = TimeSpan.FromDays(60);
 
-    public sealed record Stored(string Source, string SourceId, string Title, string Artist, double Duration, string Thumb, string PageUrl, DateTime LastSeen, TrackMeta? Meta = null, string? Folder = null);
+    public sealed record Stored(string Source, string SourceId, string Title, string Artist, double Duration, string Thumb, string PageUrl, DateTime LastSeen, TrackMeta? Meta = null, string? Folder = null, string? Group = null);
 
     public sealed record FileModel(List<Stored>? Tracks, Dictionary<string, bool>? Playable);
 
@@ -51,7 +51,7 @@ public class TrackRegistry
     public IReadOnlyList<TrackResult> TracksOfAlbum(Guid albumId)
     {
         EnsureLoaded();
-        return _bySource.Values.Select(v => v.Track).Where(t => t.Meta is not null && t.AlbumId == albumId).OrderBy(t => t.Meta!.DiscNumber ?? 1).ThenBy(t => t.Meta!.TrackNumber ?? 999).ThenBy(t => t.DisplayTitle).ToList();
+        return _bySource.Values.Select(v => v.Track).Where(t => t.Meta is not null && !t.IsAlbumStub && t.AlbumId == albumId).OrderBy(t => t.Meta!.DiscNumber ?? 1).ThenBy(t => t.Meta!.TrackNumber ?? 999).ThenBy(t => t.DisplayTitle).ToList();
     }
 
     /// <summary>Finds the track (and the artist's name) behind an artist id handed out in search results.</summary>
@@ -149,7 +149,7 @@ public class TrackRegistry
                             InputGuard.CleanText(s.Artist, 200, "Unknown"),
                             s.Duration,
                             InputGuard.SafeThumbnailUrl(s.Thumb) ?? string.Empty,
-                            InputGuard.SafePageUrl(s.PageUrl) ?? string.Empty) { Meta = Sanitize(s.Meta), FolderOverride = SafeFolder(s.Folder) });
+                            InputGuard.SafePageUrl(s.PageUrl) ?? string.Empty) { Meta = Sanitize(s.Meta), FolderOverride = SafeFolder(s.Folder), GroupId = s.Group is { Length: > 0 and <= 15 } g && g.All(char.IsDigit) ? g : null });
                         _bySource[t.Key] = (t, s.LastSeen);
                         _byId[t.TrackId] = t;
                         _byId[t.AlbumId] = t;
@@ -221,7 +221,7 @@ public class TrackRegistry
                 .Where(v => v.LastSeen >= cutoff)
                 .OrderByDescending(v => v.LastSeen)
                 .Take(MaxEntries)
-                .Select(v => new Stored(v.Track.Source, v.Track.SourceId, v.Track.Title, v.Track.Artist, v.Track.DurationSeconds, v.Track.ThumbnailUrl, v.Track.PageUrl, v.LastSeen, v.Track.Meta, v.Track.FolderOverride))
+                .Select(v => new Stored(v.Track.Source, v.Track.SourceId, v.Track.Title, v.Track.Artist, v.Track.DurationSeconds, v.Track.ThumbnailUrl, v.Track.PageUrl, v.LastSeen, v.Track.Meta, v.Track.FolderOverride, v.Track.GroupId))
                 .ToList();
             Directory.CreateDirectory(Path.GetDirectoryName(_file)!);
             File.WriteAllText(_file + ".tmp", JsonSerializer.Serialize(new FileModel(rows, new Dictionary<string, bool>(_playable))));

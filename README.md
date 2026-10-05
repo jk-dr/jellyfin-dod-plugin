@@ -43,12 +43,17 @@ Appends YouTube and SoundCloud results to Jellyfin's standard search API (`/Item
 - **Artist and album folders:** every song is filed as `Artist/Album/yt-ID.m4a` inside the library, and the folders are
   created when the song is added. A song with no known album gets its own album named after the song (`Title`) under its artist.
   There is no "one album for everything" mode.
-- **Artist pages from the artist's own profiles:** opening an artist (one you have, or one from a search result) adds
-  the songs and albums found on the artist's official YouTube channel (its "Official Album Playlist" albums and its
-  videos) and SoundCloud profile, read with yt-dlp. Albums you lack show as albums; songs missing from an album you
-  already have are added to that album; songs you already have are left out. Clicking a song downloads it the usual way
-  (YouTube first, then SoundCloud). The first look at an artist takes several seconds (cached for 6 hours). Channel
-  and profile are matched by the artist's exact name. Setting: "Fill artist pages ...".
+- **Artists, albums and songs you don't have yet:** searching an artist's name (or opening them) fills the Songs, Albums
+  and Artists sections, not just songs. Two sources are combined:
+  - the artist's own profiles, read with yt-dlp: the official YouTube channel (its "Official Album Playlist" albums and
+    its videos) and the SoundCloud profile, whose songs are real YouTube/SoundCloud tracks;
+  - the iTunes catalog (no key): the artist's full discography with track lists, track numbers and cover art. Opening
+    one of these albums lists all its songs. Clicking a song looks for a matching upload (the right song and length, no
+    remixes, covers or live versions): the artist's best YouTube copies first, then SoundCloud ones, moving on if a copy
+    fails. It is then filed as `Artist/Album/` like everything else.
+  Albums and songs you already have are left out, and songs missing from an album you have are added to that album.
+  The first look at an artist takes a few seconds (cached for 6 hours; the catalog part answers first, the profile
+  part joins in on the next look). Setting: "Fill artist pages ...".
 - **Find and add:** the settings page can search and add a song directly, for apps that only search a synced copy
   of the library (e.g. Manet) and so never ask the server.
 - **Recent download problems:** the settings page lists why downloads failed; clients only show a generic error.

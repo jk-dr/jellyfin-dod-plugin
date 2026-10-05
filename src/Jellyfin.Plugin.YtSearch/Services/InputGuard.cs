@@ -11,6 +11,7 @@ public static class InputGuard
 
     private static readonly Regex YouTubeId = new("^[A-Za-z0-9_-]{11}$", RegexOptions.Compiled);
     private static readonly Regex SoundCloudId = new("^[0-9]{1,20}$", RegexOptions.Compiled);
+    private static readonly Regex CatalogId = new("^a?[0-9]{1,15}$", RegexOptions.Compiled);
 
     // Hosts that are allowed to serve artwork / be passed to yt-dlp. Anything else (internal addresses, other sites) is dropped.
     private static readonly string[] ThumbnailHosts = { "ytimg.com", "ggpht.com", "googleusercontent.com", "sndcdn.com", "mzstatic.com" };
@@ -18,7 +19,7 @@ public static class InputGuard
 
     /// <summary>Ids end up in file names, so only the exact alphabets of each service are accepted (no '/', '..', etc.).</summary>
     public static bool IsValidSourceId(string source, string? id) =>
-        id is not null && (source == Sources.SoundCloud ? SoundCloudId.IsMatch(id) : YouTubeId.IsMatch(id));
+        id is not null && (source == Sources.SoundCloud ? SoundCloudId.IsMatch(id) : source == Sources.Catalog ? CatalogId.IsMatch(id) : YouTubeId.IsMatch(id));
 
     /// <summary>Strips control characters and caps the length. Returns empty if nothing usable remains.</summary>
     public static string CleanQuery(string? query)

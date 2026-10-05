@@ -6,7 +6,7 @@ using System.Text.RegularExpressions;
 namespace Jellyfin.Plugin.YtSearch.Services;
 
 /// <summary>One song from the catalog lookup.</summary>
-public sealed record CatalogSong(string Title, string Artist, string Album, string AlbumArtist, int? Year, int? TrackNumber, int? DiscNumber, string? Genre, double DurationSeconds, string? ArtworkUrl);
+public sealed record CatalogSong(string Title, string Artist, string Album, string AlbumArtist, int? Year, int? TrackNumber, int? DiscNumber, string? Genre, double DurationSeconds, string? ArtworkUrl, long TrackId = 0, long CollectionId = 0);
 
 /// <summary>
 /// Decides which online result is which catalog song. Deliberately strict: a wrong album is worse than no album,

@@ -28,7 +28,7 @@ namespace Jellyfin.Plugin.YtSearch.Services;
 public class LibraryService
 {
 
-    private static readonly Regex OurFileName = new("^(yt|sc)-[A-Za-z0-9_-]{1,20}\\.m4a$", RegexOptions.Compiled);
+    private static readonly Regex OurFileName = new("^(yt|sc|ct)-[A-Za-z0-9_-]{1,20}\\.m4a$", RegexOptions.Compiled);
 
     private readonly ILibraryManager _library;
     private readonly IProviderManager _providers;
@@ -134,7 +134,7 @@ public class LibraryService
         }
 
         var root = Root.TrimEnd('/');
-        var name = (r.Source == Sources.SoundCloud ? "sc-" : "yt-") + r.SourceId + ".m4a";
+        var name = (r.Source == Sources.SoundCloud ? "sc-" : r.Source == Sources.Catalog ? "ct-" : "yt-") + r.SourceId + ".m4a";
         if (r.FolderOverride is { Length: > 0 } folder)
         {
             // The folder of an album that is already in a Jellyfin library (set by this plugin, checked here again).
@@ -426,6 +426,11 @@ public class LibraryService
             .Where(a => !string.IsNullOrEmpty(a.Path) && Directory.Exists(a.Path));
         return albums.Select(a => (a.Name, a.Path.TrimEnd('/'), (IReadOnlyList<string>)SongTitlesIn(a.Id))).ToList();
     }
+
+    /// <summary>The id of the artist with this exact name in the library, if there is one.</summary>
+    public Guid? ArtistIdByName(string name) =>
+        _library.GetItemList(new InternalItemsQuery { IncludeItemTypes = new[] { Jellyfin.Data.Enums.BaseItemKind.MusicArtist }, Name = name, Recursive = true })
+            .FirstOrDefault(a => string.Equals(a.Name, name, StringComparison.OrdinalIgnoreCase))?.Id;
 
     /// <summary>The title of every song the library has by an artist.</summary>
     public IReadOnlyList<string> SongTitlesOfArtist(Guid artistId) =>
